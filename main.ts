@@ -68,6 +68,21 @@ client.once(djs.Events.ClientReady, async (readyClient) => {
   // Initialize Google Sheets client
   await initSheets();
   console.log("Google Sheets client initialized");
+
+  // Send startup message to draft channel if configured
+  if (CONFIG.DRAFT_CHANNEL_ID) {
+    try {
+      const channel = await readyClient.channels.fetch(CONFIG.DRAFT_CHANNEL_ID);
+      if (channel && channel.isTextBased()) {
+        await (channel as djs.TextChannel).send(
+          "✅ Bot is now online and ready to organize drafts! Use `!help` to see available commands.",
+        );
+      }
+    } catch (error) {
+      console.error("Error sending startup message:", error);
+      // Don't fail startup if we can't send the message
+    }
+  }
 });
 
 /**
@@ -137,7 +152,7 @@ client.on(djs.Events.MessageCreate, async (message) => {
   Example: \`!draft TLA\`
   • Adds you to the draft queue for the specified set
   • At 4 players: Notifies all participants with a suggestion for pick 2 drafts
-  • At 3 players: Draft is full, generates draftmancer.com link, and closes
+  • At 8 players: Draft is full, generates draftmancer.com link, and closes
 
 \`!leave <set_code>\` - Leave a draft
   Example: \`!leave TLA\`
@@ -235,15 +250,15 @@ client.on(djs.Events.MessageCreate, async (message) => {
       }
     }
 
-    // Ping and close at 3 players (changed from 8 for testing)
-    if (count === 3) {
+    // Ping and close at 8 players
+    if (count === 8) {
       const draft = getAllDrafts().get(upperAcronym);
       if (draft) {
         const mentions = Array.from(draft.keys())
           .map((uid) => `<@${uid}>`)
           .join(" ");
         await message.reply(
-          `🔥 Draft \`${upperAcronym}\` is FULL (**3 players**)!\n${mentions}`,
+          `🔥 Draft \`${upperAcronym}\` is FULL (**8 players**)!\n${mentions}`,
         );
 
         // Generate UUID for draftmancer.com session
