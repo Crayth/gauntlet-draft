@@ -1,0 +1,7 @@
+{
+  "OWNER_ID": "your_discord_user_id",
+  "GUILD_ID": "your_discord_guild_id",
+  "LIVE_SHEET_ID": "your_google_sheet_id",
+  "DRAFT_CHANNEL_ID": "your_draft_channel_id (optional)"
+}
+

@@ -1,0 +1,6 @@
+.direnv
+.env
+*.json
+private
+output.log
+
