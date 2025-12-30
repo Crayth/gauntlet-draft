@@ -148,15 +148,18 @@ client.on(djs.Events.MessageCreate, async (message) => {
 
     const helpMessage = `**Available Commands:**
 
-\`!draft <set_code>\` - Join or create a draft for a 3-letter set code
-  Example: \`!draft TLA\`
-  • Adds you to the draft queue for the specified set
+\`!draft <set_code>\` or \`!draft <set_code1> <set_code2> <set_code3>\` - Join or create a draft
+  Examples: \`!draft TLA\` or \`!draft TLA FIN DFT\`
+  • Adds you to the draft queue for the specified set(s)
+  • Single set: One pack from that set
+  • Three sets: One pack from each set (e.g., TLA + FIN + DFT)
   • At 4 players: Notifies all participants with a suggestion for pick 2 drafts
   • At 8 players: Draft is full, generates draftmancer.com link, and closes
 
-\`!leave <set_code>\` - Leave a draft
-  Example: \`!leave TLA\`
+\`!leave <set_code>\` or \`!leave <set_code1> <set_code2> <set_code3>\` - Leave a draft
+  Examples: \`!leave TLA\` or \`!leave TLA FIN DFT\`
   • Removes you from the specified draft queue
+  • Use the same format you used to join (1 or 3 set codes)
 
 \`!available\` - List all active drafts
   • Shows all current draft queues and their player counts
@@ -174,29 +177,54 @@ client.on(djs.Events.MessageCreate, async (message) => {
     return;
   }
 
-  // Draft command: !draft <set_code>
+  // Draft command: !draft <set_code> or !draft <set_code1> <set_code2> <set_code3>
   if (command === "!draft") {
     // Check if command is from allowed channel
     if (!isAllowedDraftChannel(message)) {
       return;
     }
-    const formatAcronym = parts[1];
-    if (!formatAcronym) {
-      await message.reply("Please provide a 3-letter set code. Example: `!draft TLA`");
+    
+    // Parse set codes (expect 1 or 3)
+    const setCodes = parts.slice(1).filter((part) => part.length > 0);
+    
+    if (setCodes.length === 0) {
+      await message.reply(
+        "Please provide 1 or 3 set codes. Examples: `!draft TLA` or `!draft TLA FIN DFT`",
+      );
       return;
     }
 
-    const upperAcronym = formatAcronym.toUpperCase();
-    if (upperAcronym.length !== 3) {
-      await message.reply("Invalid code. Use a 3-letter code.");
+    if (setCodes.length !== 1 && setCodes.length !== 3) {
+      await message.reply(
+        "Please provide exactly 1 or 3 set codes. Examples: `!draft TLA` or `!draft TLA FIN DFT`",
+      );
       return;
     }
+
+    // Validate all codes are 3 letters
+    const upperCodes = setCodes.map((code) => code.toUpperCase());
+    for (const code of upperCodes) {
+      if (code.length !== 3) {
+        await message.reply(
+          `Invalid code: \`${code}\`. All set codes must be exactly 3 letters.`,
+        );
+        return;
+      }
+    }
+
+    // Create draft key: single code stays as-is, multiple codes joined with dashes
+    const draftKey = upperCodes.length === 1 
+      ? upperCodes[0] 
+      : upperCodes.join("-");
+    
+    // Display format for messages
+    const draftDisplay = upperCodes.join(" ");
 
     // Check if user is already in the draft
-    const existingDraft = getAllDrafts().get(upperAcronym);
+    const existingDraft = getAllDrafts().get(draftKey);
     if (existingDraft && existingDraft.has(message.author.id)) {
       await message.reply(
-        `${message.author}, you are already in \`${upperAcronym}\`.`,
+        `${message.author}, you are already in \`${draftDisplay}\`.`,
       );
       return;
     }
@@ -209,13 +237,13 @@ client.on(djs.Events.MessageCreate, async (message) => {
 
     if (pretend) {
       await message.reply(
-        `[PRETEND] Would add ${message.author} to draft \`${upperAcronym}\``,
+        `[PRETEND] Would add ${message.author} to draft \`${draftDisplay}\``,
       );
       return;
     }
 
     const wasAdded = addPlayerToDraft(
-      upperAcronym,
+      draftKey,
       message.author.id,
       textChannel,
       client,
@@ -224,25 +252,25 @@ client.on(djs.Events.MessageCreate, async (message) => {
 
     if (!wasAdded) {
       await message.reply(
-        `${message.author}, you are already in \`${upperAcronym}\`.`,
+        `${message.author}, you are already in \`${draftDisplay}\`.`,
       );
       return;
     }
 
-    const count = getPlayerCount(upperAcronym);
+    const count = getPlayerCount(draftKey);
     await message.reply(
-      `${message.author} has joined \`${upperAcronym}\`.\nCurrent players: **${count}**`,
+      `${message.author} has joined \`${draftDisplay}\`.\nCurrent players: **${count}**`,
     );
 
     // Ping at 4 players
     if (count === 4) {
-      const draft = getAllDrafts().get(upperAcronym);
+      const draft = getAllDrafts().get(draftKey);
       if (draft) {
         const mentions = Array.from(draft.keys())
           .map((uid) => `<@${uid}>`)
           .join(" ");
         await message.reply(
-          `🎉 Draft \`${upperAcronym}\` now has **4 players**!\n${mentions}`,
+          `🎉 Draft \`${draftDisplay}\` now has **4 players**!\n${mentions}`,
         );
         await message.reply(
           "Why not consider a pick 2 draft on draftmancer.com if finding 8 is difficult?",
@@ -252,13 +280,13 @@ client.on(djs.Events.MessageCreate, async (message) => {
 
     // Ping and close at 8 players
     if (count === 8) {
-      const draft = getAllDrafts().get(upperAcronym);
+      const draft = getAllDrafts().get(draftKey);
       if (draft) {
         const mentions = Array.from(draft.keys())
           .map((uid) => `<@${uid}>`)
           .join(" ");
         await message.reply(
-          `🔥 Draft \`${upperAcronym}\` is FULL (**8 players**)!\n${mentions}`,
+          `🔥 Draft \`${draftDisplay}\` is FULL (**8 players**)!\n${mentions}`,
         );
 
         // Generate UUID for draftmancer.com session
@@ -268,41 +296,69 @@ client.on(djs.Events.MessageCreate, async (message) => {
         );
 
         // Close the draft
-        closeDraft(upperAcronym);
+        closeDraft(draftKey);
         await message.reply(
-          `Draft \`${upperAcronym}\` has closed and been removed.`,
+          `Draft \`${draftDisplay}\` has closed and been removed.`,
         );
       }
     }
     return;
   }
 
-  // Leave command: !leave <set_code>
+  // Leave command: !leave <set_code> or !leave <set_code1> <set_code2> <set_code3>
   if (command === "!leave") {
     // Check if command is from allowed channel
     if (!isAllowedDraftChannel(message)) {
       return;
     }
-    const formatAcronym = parts[1];
-    if (!formatAcronym) {
+    
+    // Parse set codes (expect 1 or 3, matching the draft format)
+    const setCodes = parts.slice(1).filter((part) => part.length > 0);
+    
+    if (setCodes.length === 0) {
       await message.reply(
-        "Usage: `!leave TLA` — remove yourself from that draft",
+        "Usage: `!leave TLA` or `!leave TLA FIN DFT` — remove yourself from that draft",
       );
       return;
     }
 
-    const upperAcronym = formatAcronym.toUpperCase();
-    const draft = getAllDrafts().get(upperAcronym);
+    if (setCodes.length !== 1 && setCodes.length !== 3) {
+      await message.reply(
+        "Please provide exactly 1 or 3 set codes to match the draft format.",
+      );
+      return;
+    }
+
+    // Validate all codes are 3 letters
+    const upperCodes = setCodes.map((code) => code.toUpperCase());
+    for (const code of upperCodes) {
+      if (code.length !== 3) {
+        await message.reply(
+          `Invalid code: \`${code}\`. All set codes must be exactly 3 letters.`,
+        );
+        return;
+      }
+    }
+
+    // Create draft key: single code stays as-is, multiple codes joined with dashes
+    const draftKey = upperCodes.length === 1 
+      ? upperCodes[0] 
+      : upperCodes.join("-");
+    
+    // Display format for messages
+    const draftDisplay = upperCodes.join(" ");
+
+    const draft = getAllDrafts().get(draftKey);
     if (!draft) {
       await message.reply(
-        `There is no active \`${upperAcronym}\` draft to leave.`,
+        `There is no active \`${draftDisplay}\` draft to leave.`,
       );
       return;
     }
 
     if (!draft.has(message.author.id)) {
       await message.reply(
-        `${message.author}, you are not in \`${upperAcronym}\`.`,
+        `${message.author}, you are not in \`${draftDisplay}\`.`,
       );
       return;
     }
@@ -314,21 +370,21 @@ client.on(djs.Events.MessageCreate, async (message) => {
 
     if (pretend) {
       await message.reply(
-        `[PRETEND] Would remove ${message.author} from draft \`${upperAcronym}\``,
+        `[PRETEND] Would remove ${message.author} from draft \`${draftDisplay}\``,
       );
       return;
     }
 
-    await leaveDraft(upperAcronym, message.author.id, textChannel, pretend);
-    const count = getPlayerCount(upperAcronym);
+    await leaveDraft(draftKey, message.author.id, textChannel, pretend);
+    const count = getPlayerCount(draftKey);
     await message.reply(
-      `${message.author} has left \`${upperAcronym}\`.\nRemaining players: **${count}**`,
+      `${message.author} has left \`${draftDisplay}\`.\nRemaining players: **${count}**`,
     );
 
     if (count === 0) {
-      removeDraftIfEmpty(upperAcronym);
+      removeDraftIfEmpty(draftKey);
       await message.reply(
-        `The \`${upperAcronym}\` draft is now empty and has been removed.`,
+        `The \`${draftDisplay}\` draft is now empty and has been removed.`,
       );
     }
     return;
@@ -347,8 +403,12 @@ client.on(djs.Events.MessageCreate, async (message) => {
     }
 
     const messageLines = ["**Active Drafts:**"];
-    for (const [draftName, players] of allDrafts) {
-      messageLines.push(`- \`${draftName}\`: ${players.size} player(s)`);
+    for (const [draftKey, players] of allDrafts) {
+      // Convert draft key to display format (dash-separated to space-separated)
+      const draftDisplay = draftKey.includes("-") 
+        ? draftKey.split("-").join(" ")
+        : draftKey;
+      messageLines.push(`- \`${draftDisplay}\`: ${players.size} player(s)`);
     }
     await message.reply(messageLines.join("\n"));
     return;

@@ -79,17 +79,28 @@ export function startReminderTimer(
     }
 
     const userMention = `<@${userId}>`;
+    // Convert draft key to display format (dash-separated to space-separated)
+    const draftDisplay = formatAcronym.includes("-")
+      ? formatAcronym.split("-").join(" ")
+      : formatAcronym;
+    
     await channel.send(
-      `${userMention}, you have been in the \`${formatAcronym}\` draft for 1 hour. ` +
-        `Do you still want to stay? Respond with \`!yes\` to remain, or \`!leave ${formatAcronym}\` to leave the draft.`,
+      `${userMention}, you have been in the \`${draftDisplay}\` draft for 1 hour. ` +
+        `Do you still want to stay? Respond with \`!yes\` to remain, or \`!leave ${draftDisplay}\` to leave the draft.`,
     );
 
-    // Wait for response
+    // Wait for response - accept both !yes and !leave with either format (dash or space separated)
     const collector = channel.createMessageCollector({
-      filter: (m) =>
-        m.author.id === userId &&
-        (m.content.toLowerCase() === "!yes" ||
-          m.content.toLowerCase() === `!leave ${formatAcronym.toLowerCase()}`),
+      filter: (m) => {
+        if (m.author.id !== userId) return false;
+        const content = m.content.toLowerCase().trim();
+        if (content === "!yes") return true;
+        // Check for !leave with space-separated format
+        if (content === `!leave ${draftDisplay.toLowerCase()}`) return true;
+        // Check for !leave with dash-separated format (for backward compatibility)
+        if (content === `!leave ${formatAcronym.toLowerCase()}`) return true;
+        return false;
+      },
       time: REMOVAL_DELAY_MS,
       max: 1,
     });
