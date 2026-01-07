@@ -13,6 +13,13 @@ import {
   closeDraft,
   removeDraftIfEmpty,
 } from "./drafts.ts";
+import {
+  optInForNotifications,
+  optOutOfNotifications,
+  resetNotificationTimer,
+  getOptedInSetCodes,
+  sendNotificationsForSetCode,
+} from "./notifications.ts";
 
 export { CONFIG };
 
@@ -161,6 +168,22 @@ client.on(djs.Events.MessageCreate, async (message) => {
   • Removes you from the specified draft queue
   • Use the same format you used to join (1 or 3 set codes)
 
+\`!notify <set_code>\` or \`!notify <set_code1> <set_code2> <set_code3>\` - Opt in for DM notifications
+  Examples: \`!notify TLA\` or \`!notify TLA FIN DFT\`
+  • You'll receive a DM when the queue reaches 5+ players for that set
+  • Notifications are sent once every 12 hours per set code
+  • Use \`!reset <set_code>\` to reset your notification timer
+
+\`!reset <set_code>\` or \`!reset <set_code1> <set_code2> <set_code3>\` - Reset notification timer
+  Examples: \`!reset TLA\` or \`!reset TLA FIN DFT\`
+  • Resets your notification timer for the specified set code
+  • Allows you to receive notifications again immediately
+
+\`!cancel <set_code>\` or \`!cancel <set_code1> <set_code2> <set_code3>\` - Opt out of notifications
+  Examples: \`!cancel TLA\` or \`!cancel TLA FIN DFT\`
+  • Removes your opt-in for notifications for the specified set code
+  • You will no longer receive DMs for this set code
+
 \`!available\` - List all active drafts
   • Shows all current draft queues and their player counts
 
@@ -276,6 +299,11 @@ client.on(djs.Events.MessageCreate, async (message) => {
           "Why not consider a pick 2 draft on draftmancer.com if finding 8 is difficult?",
         );
       }
+    }
+
+    // Send notifications at 5+ players
+    if (count >= 5) {
+      await sendNotificationsForSetCode(draftKey, count, client);
     }
 
     // Ping and close at 8 players
@@ -411,6 +439,194 @@ client.on(djs.Events.MessageCreate, async (message) => {
       messageLines.push(`- \`${draftDisplay}\`: ${players.size} player(s)`);
     }
     await message.reply(messageLines.join("\n"));
+    return;
+  }
+
+  // Notify command: !notify <set_code>
+  if (command === "!notify") {
+    // Check if command is from allowed channel
+    if (!isAllowedDraftChannel(message)) {
+      return;
+    }
+
+    // Parse set code
+    const setCode = parts[1];
+    if (!setCode) {
+      await message.reply(
+        "Please provide a set code. Usage: `!notify TLA` or `!notify TLA FIN DFT`",
+      );
+      return;
+    }
+
+    // Validate set code format (can be 1 or 3 codes, matching draft format)
+    const setCodes = parts.slice(1).filter((part) => part.length > 0);
+    if (setCodes.length !== 1 && setCodes.length !== 3) {
+      await message.reply(
+        "Please provide exactly 1 or 3 set codes. Examples: `!notify TLA` or `!notify TLA FIN DFT`",
+      );
+      return;
+    }
+
+    // Validate all codes are 3 letters
+    const upperCodes = setCodes.map((code) => code.toUpperCase());
+    for (const code of upperCodes) {
+      if (code.length !== 3) {
+        await message.reply(
+          `Invalid code: \`${code}\`. All set codes must be exactly 3 letters.`,
+        );
+        return;
+      }
+    }
+
+    // Create draft key: single code stays as-is, multiple codes joined with dashes
+    const draftKey = upperCodes.length === 1 
+      ? upperCodes[0] 
+      : upperCodes.join("-");
+    
+    // Display format for messages
+    const draftDisplay = upperCodes.join(" ");
+
+    if (pretend) {
+      await message.reply(
+        `[PRETEND] Would opt ${message.author} in for notifications for \`${draftDisplay}\``,
+      );
+      return;
+    }
+
+    optInForNotifications(message.author.id, draftKey);
+    await message.reply(
+      `✅ You've been opted in for notifications for \`${draftDisplay}\`. ` +
+      `You'll receive a DM when the queue reaches 5+ players (once every 12 hours). ` +
+      `Use \`!reset ${draftDisplay}\` to reset your notification timer.`,
+    );
+    return;
+  }
+
+  // Reset command: !reset <set_code>
+  if (command === "!reset") {
+    // Check if command is from allowed channel
+    if (!isAllowedDraftChannel(message)) {
+      return;
+    }
+
+    // Parse set code
+    const setCodes = parts.slice(1).filter((part) => part.length > 0);
+    if (setCodes.length === 0) {
+      await message.reply(
+        "Please provide a set code. Usage: `!reset TLA` or `!reset TLA FIN DFT`",
+      );
+      return;
+    }
+
+    if (setCodes.length !== 1 && setCodes.length !== 3) {
+      await message.reply(
+        "Please provide exactly 1 or 3 set codes. Examples: `!reset TLA` or `!reset TLA FIN DFT`",
+      );
+      return;
+    }
+
+    // Validate all codes are 3 letters
+    const upperCodes = setCodes.map((code) => code.toUpperCase());
+    for (const code of upperCodes) {
+      if (code.length !== 3) {
+        await message.reply(
+          `Invalid code: \`${code}\`. All set codes must be exactly 3 letters.`,
+        );
+        return;
+      }
+    }
+
+    // Create draft key: single code stays as-is, multiple codes joined with dashes
+    const draftKey = upperCodes.length === 1 
+      ? upperCodes[0] 
+      : upperCodes.join("-");
+    
+    // Display format for messages
+    const draftDisplay = upperCodes.join(" ");
+
+    if (pretend) {
+      await message.reply(
+        `[PRETEND] Would reset notification timer for ${message.author} for \`${draftDisplay}\``,
+      );
+      return;
+    }
+
+    const wasReset = resetNotificationTimer(message.author.id, draftKey);
+    if (wasReset) {
+      await message.reply(
+        `✅ Your notification timer for \`${draftDisplay}\` has been reset. ` +
+        `You can now receive notifications again if the queue reaches 5+ players.`,
+      );
+    } else {
+      await message.reply(
+        `❌ You haven't opted in for notifications for \`${draftDisplay}\`. ` +
+        `Use \`!notify ${draftDisplay}\` to opt in first.`,
+      );
+    }
+    return;
+  }
+
+  // Cancel command: !cancel <set_code>
+  if (command === "!cancel") {
+    // Check if command is from allowed channel
+    if (!isAllowedDraftChannel(message)) {
+      return;
+    }
+
+    // Parse set code
+    const setCodes = parts.slice(1).filter((part) => part.length > 0);
+    if (setCodes.length === 0) {
+      await message.reply(
+        "Please provide a set code. Usage: `!cancel TLA` or `!cancel TLA FIN DFT`",
+      );
+      return;
+    }
+
+    if (setCodes.length !== 1 && setCodes.length !== 3) {
+      await message.reply(
+        "Please provide exactly 1 or 3 set codes. Examples: `!cancel TLA` or `!cancel TLA FIN DFT`",
+      );
+      return;
+    }
+
+    // Validate all codes are 3 letters
+    const upperCodes = setCodes.map((code) => code.toUpperCase());
+    for (const code of upperCodes) {
+      if (code.length !== 3) {
+        await message.reply(
+          `Invalid code: \`${code}\`. All set codes must be exactly 3 letters.`,
+        );
+        return;
+      }
+    }
+
+    // Create draft key: single code stays as-is, multiple codes joined with dashes
+    const draftKey = upperCodes.length === 1 
+      ? upperCodes[0] 
+      : upperCodes.join("-");
+    
+    // Display format for messages
+    const draftDisplay = upperCodes.join(" ");
+
+    if (pretend) {
+      await message.reply(
+        `[PRETEND] Would opt ${message.author} out of notifications for \`${draftDisplay}\``,
+      );
+      return;
+    }
+
+    const wasOptedOut = optOutOfNotifications(message.author.id, draftKey);
+    if (wasOptedOut) {
+      await message.reply(
+        `✅ You've been opted out of notifications for \`${draftDisplay}\`. ` +
+        `You will no longer receive DMs for this set code.`,
+      );
+    } else {
+      await message.reply(
+        `❌ You haven't opted in for notifications for \`${draftDisplay}\`. ` +
+        `Use \`!notify ${draftDisplay}\` to opt in first.`,
+      );
+    }
     return;
   }
 });
