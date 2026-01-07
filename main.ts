@@ -17,7 +17,6 @@ import {
   optInForNotifications,
   optOutOfNotifications,
   resetNotificationTimer,
-  getOptedInSetCodes,
   sendNotificationsForSetCode,
 } from "./notifications.ts";
 
@@ -155,44 +154,26 @@ client.on(djs.Events.MessageCreate, async (message) => {
 
     const helpMessage = `**Available Commands:**
 
-\`!draft <set_code>\` or \`!draft <set_code1> <set_code2> <set_code3>\` - Join or create a draft
+\`!draft <set_code>\` or \`!draft <set_code1> <set_code2> <set_code3>\` - Join a draft queue
   Examples: \`!draft TLA\` or \`!draft TLA FIN DFT\`
-  • Adds you to the draft queue for the specified set(s)
-  • Single set: One pack from that set
-  • Three sets: One pack from each set (e.g., TLA + FIN + DFT)
-  • At 4 players: Notifies all participants with a suggestion for pick 2 drafts
-  • At 8 players: Draft is full, generates draftmancer.com link, and closes
+  • Single set: One pack from that set | Three sets: One pack from each
+  • At 8 players: Draft closes with draftmancer.com link
 
-\`!leave <set_code>\` or \`!leave <set_code1> <set_code2> <set_code3>\` - Leave a draft
-  Examples: \`!leave TLA\` or \`!leave TLA FIN DFT\`
-  • Removes you from the specified draft queue
-  • Use the same format you used to join (1 or 3 set codes)
+\`!leave <set_code>\` or \`!leave <set_code1> <set_code2> <set_code3>\` - Leave a draft queue
 
-\`!notify <set_code>\` or \`!notify <set_code1> <set_code2> <set_code3>\` - Opt in for DM notifications
-  Examples: \`!notify TLA\` or \`!notify TLA FIN DFT\`
-  • You'll receive a DM when the queue reaches 5+ players for that set
-  • Notifications are sent once every 12 hours per set code
-  • Use \`!reset <set_code>\` to reset your notification timer
+\`!notify <set_code>\` or \`!notify <set_code1> <set_code2> <set_code3>\` - Opt in for DM notifications when queue reaches 5+ players (once per 12 hours)
 
-\`!reset <set_code>\` or \`!reset <set_code1> <set_code2> <set_code3>\` - Reset notification timer
-  Examples: \`!reset TLA\` or \`!reset TLA FIN DFT\`
-  • Resets your notification timer for the specified set code
-  • Allows you to receive notifications again immediately
+\`!reset <set_code>\` or \`!reset <set_code1> <set_code2> <set_code3>\` - Reset notification timer to receive notifications immediately
 
 \`!cancel <set_code>\` or \`!cancel <set_code1> <set_code2> <set_code3>\` - Opt out of notifications
-  Examples: \`!cancel TLA\` or \`!cancel TLA FIN DFT\`
-  • Removes your opt-in for notifications for the specified set code
-  • You will no longer receive DMs for this set code
 
-\`!available\` - List all active drafts
-  • Shows all current draft queues and their player counts
+\`!available\` - List all active drafts and player counts
 
 \`!help\` - Show this help message
 
 **Notes:**
-• All draft commands must be used in the designated draft channel (if configured)
-• After 1 hour in a draft, you'll be pinged to confirm you still want to stay
-• Respond with \`!yes\` within 5 minutes to reset your timer, or \`!leave <set_code>\` to leave
+• Commands must be used in the designated draft channel (if configured)
+• After 1 hour in a draft, you'll be pinged to confirm. Respond with \`!yes\` within 5 minutes or \`!leave <set_code>\` to leave
 • Players are automatically removed if they don't respond to the inactivity reminder
 • Drafts are cleared when the bot goes offline`;
 
@@ -284,22 +265,6 @@ client.on(djs.Events.MessageCreate, async (message) => {
     await message.reply(
       `${message.author} has joined \`${draftDisplay}\`.\nCurrent players: **${count}**`,
     );
-
-    // Ping at 4 players
-    if (count === 4) {
-      const draft = getAllDrafts().get(draftKey);
-      if (draft) {
-        const mentions = Array.from(draft.keys())
-          .map((uid) => `<@${uid}>`)
-          .join(" ");
-        await message.reply(
-          `🎉 Draft \`${draftDisplay}\` now has **4 players**!\n${mentions}`,
-        );
-        await message.reply(
-          "Why not consider a pick 2 draft on draftmancer.com if finding 8 is difficult?",
-        );
-      }
-    }
 
     // Send notifications at 5+ players
     if (count >= 5) {
