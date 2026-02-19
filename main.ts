@@ -188,8 +188,6 @@ client.on(djs.Events.MessageCreate, async (message) => {
 
 \`!available\` - List all active drafts and player counts
 
-\`!fire <draft_name>\` - *(Owner only, testing)* Close a queue early and record players to Draft Log
-
 \`!report <draft_name> @opponent 2-0\` or \`!report <draft_name> @opponent 2-1\` - Report a match result (you = winner, tagged = loser)
 
 \`!status <draft_name>\` - Show current round and matchup status (completed vs in progress, who won)
@@ -398,64 +396,6 @@ client.on(djs.Events.MessageCreate, async (message) => {
         `The \`${draftDisplay}\` draft is now empty and has been removed.`,
       );
     }
-    return;
-  }
-
-  // Fire command: !fire <draft_name> — testing only, owner-only. Closes a queue early and records to Draft Log.
-  if (command === "!fire") {
-    if (message.author.id !== CONFIG.OWNER_ID) {
-      return; // Silent ignore for non-owners
-    }
-    if (!isAllowedDraftChannel(message)) {
-      return;
-    }
-
-    const draftName = parts[1];
-    if (!draftName) {
-      await message.reply(
-        "Usage: `!fire <draft_name>` — closes the queue early and records players to Draft Log (testing).",
-      );
-      return;
-    }
-
-    const draftKey = draftName;
-    const draftDisplay = draftName;
-    const draft = getAllDrafts().get(draftKey);
-
-    if (!draft || draft.size === 0) {
-      await message.reply(
-        `There is no active \`${draftDisplay}\` draft to fire.`,
-      );
-      return;
-    }
-
-    if (!message.channel.isTextBased() || message.channel.isDMBased()) {
-      return;
-    }
-
-    const userIds = Array.from(draft.keys());
-    const count = userIds.length;
-    const mentions = userIds.map((uid) => `<@${uid}>`).join(" ");
-
-    await message.reply(
-      `🔥 Draft \`${draftDisplay}\` fired early (**${count} player(s)**)!\n${mentions}`,
-    );
-
-    await recordDraftToLog(draftKey, userIds, client, pretend);
-
-    if (userIds.length === 8) {
-      await createRound1Matchups(draftKey, userIds, pretend, client);
-    }
-
-    const draftUuid = crypto.randomUUID();
-    await message.reply(
-      `Please visit https://draftmancer.com/?session=${draftUuid} to start the draft.`,
-    );
-
-    closeDraft(draftKey);
-    await message.reply(
-      `Draft \`${draftDisplay}\` has closed and been removed.`,
-    );
     return;
   }
 

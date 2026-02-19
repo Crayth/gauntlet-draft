@@ -312,6 +312,8 @@ async function sendPodFinalStandings(
   if (!CONFIG.MATCHMAKING_CHANNEL_ID) return;
   const winCounts = new Map<string, number>();
   for (const row of allRows) {
+    if (row.p1) winCounts.set(row.p1, winCounts.get(row.p1) ?? 0);
+    if (row.p2) winCounts.set(row.p2, winCounts.get(row.p2) ?? 0);
     if (row.winner) {
       winCounts.set(row.winner, (winCounts.get(row.winner) ?? 0) + 1);
     }
