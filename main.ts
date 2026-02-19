@@ -192,13 +192,15 @@ client.on(djs.Events.MessageCreate, async (message) => {
 
 \`!report <draft_name> @opponent 2-0\` or \`!report <draft_name> @opponent 2-1\` - Report a match result (you = winner, tagged = loser)
 
-\`!status <draft_name>\` - Show current round and matchup status
+\`!status <draft_name>\` - Show current round and matchup status (completed vs in progress, who won)
 
 \`!help\` - Show this help message
 
 **Notes:**
 • Draft commands must be used in the designated draft channel (if configured)
-• Match reporting (\`!report\`) must be used in the designated matchmaking channel (if configured)
+• \`!report\` and \`!status\` must be used in the designated matchmaking channel (if configured)
+• Draft names must be unique — each name can only be used once per pod (case-sensitive)
+• Round matchups and pod final standings are announced in the matchmaking channel
 • After 1 hour in a draft (without a queue timeout), you'll receive a DM to confirm. Respond in DMs with \`!yes\` within 5 minutes or \`!leave <draft_name>\` to leave
 • Players are automatically removed if they don't respond to the inactivity reminder
 • Drafts are cleared when the bot goes offline`;
