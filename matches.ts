@@ -81,7 +81,7 @@ export async function reportMatch(
 
   for (let i = 0; i < values.length; i++) {
     const row = values[i];
-    if (!row || row.length < 7) continue;
+    if (!row || row.length < 5) continue;
 
     const rowDraft = String(row[0] ?? "").trim();
     const p1 = String(row[3] ?? "").trim();
