@@ -130,7 +130,7 @@ interface MatchupRow {
 }
 
 function parseMatchupRow(row: unknown[]): MatchupRow | null {
-  if (!row || row.length < 7) return null;
+  if (!row || row.length < 5) return null; // Need at least Draft Name, Round, Match #, P1, P2; Winner and Result optional
   const round = parseInt(String(row[1] ?? ""), 10);
   const matchNum = parseInt(String(row[2] ?? ""), 10);
   if (isNaN(round) || isNaN(matchNum)) return null;
@@ -173,12 +173,10 @@ export async function getDraftStatus(
   );
 
   const draftLower = draftName.toLowerCase();
-  console.log(response);
   const values = response.values || [];
   const rows: MatchupRow[] = [];
   for (let i = 0; i < values.length; i++) {
     const parsed = parseMatchupRow(values[i]);
-    console.log(parsed);
     if (parsed && parsed.draftName.toLowerCase() === draftLower) {
       rows.push(parsed);
     }
