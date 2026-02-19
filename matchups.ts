@@ -173,6 +173,7 @@ export async function getDraftStatus(
   );
 
   const draftLower = draftName.toLowerCase();
+  console.log(response);
   const values = response.values || [];
   const rows: MatchupRow[] = [];
   for (let i = 0; i < values.length; i++) {
