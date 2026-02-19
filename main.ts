@@ -7,10 +7,10 @@ import { initSheets } from "./sheets.ts";
 import { ensurePlayerInDatabase } from "./player_database.ts";
 import {
   addPlayerToDraft,
-  leaveDraft,
+  closeDraft,
   getAllDrafts,
   getPlayerCount,
-  closeDraft,
+  leaveDraft,
   removeDraftIfEmpty,
 } from "./drafts.ts";
 import {
@@ -63,6 +63,7 @@ const client = new djs.Client({
     djs.GatewayIntentBits.GuildMembers,
     djs.GatewayIntentBits.GuildMessages,
     djs.GatewayIntentBits.MessageContent,
+    djs.GatewayIntentBits.DirectMessages,
   ],
 });
 
@@ -94,7 +95,10 @@ client.once(djs.Events.ClientReady, async (readyClient) => {
 /**
  * Gets the display name for a Discord user, preferring guild display name if available.
  */
-function getUserDisplayName(user: djs.User, member: djs.GuildMember | null): string {
+function getUserDisplayName(
+  user: djs.User,
+  member: djs.GuildMember | null,
+): string {
   if (member) {
     return member.displayName || user.username;
   }
@@ -114,7 +118,7 @@ function isAllowedDraftChannel(message: djs.Message): boolean {
 /**
  * Ensures a user is in the Player Database. Should be called whenever a user
  * interacts with the bot to automatically add them if they don't exist.
- * 
+ *
  * This function can be used by future bot features (button interactions, slash commands, etc.)
  * to automatically register users when they interact with the bot.
  */
@@ -154,18 +158,18 @@ client.on(djs.Events.MessageCreate, async (message) => {
 
     const helpMessage = `**Available Commands:**
 
-\`!draft <set_code>\` or \`!draft <set_code1> <set_code2> <set_code3>\` - Join a draft queue
-  Examples: \`!draft TLA\` or \`!draft TLA FIN DFT\`
-  • Single set: One pack from that set | Three sets: One pack from each
+\`!draft <set_code>\` - Join a draft queue
+  Examples: \`!draft TLA\` or \`!draft AGL 4\`
+  • Optional \`<hours>\` (1-12): Remove me if queue doesn't reach 8 in that time (e.g. \`!draft AGL 4\`)
   • At 8 players: Draft closes with draftmancer.com link
 
-\`!leave <set_code>\` or \`!leave <set_code1> <set_code2> <set_code3>\` - Leave a draft queue
+\`!leave <set_code>\` - Leave a draft queue
 
-\`!notify <set_code>\` or \`!notify <set_code1> <set_code2> <set_code3>\` - Opt in for DM notifications when queue reaches 5+ players (once per 12 hours)
+\`!notify <set_code>\` - Opt in for DM notifications when queue reaches 5+ players (once per 12 hours)
 
-\`!reset <set_code>\` or \`!reset <set_code1> <set_code2> <set_code3>\` - Reset notification timer to receive notifications immediately
+\`!reset <set_code>\` - Reset notification timer to receive notifications immediately
 
-\`!cancel <set_code>\` or \`!cancel <set_code1> <set_code2> <set_code3>\` - Opt out of notifications
+\`!cancel <set_code>\` - Opt out of notifications
 
 \`!available\` - List all active drafts and player counts
 
@@ -173,7 +177,7 @@ client.on(djs.Events.MessageCreate, async (message) => {
 
 **Notes:**
 • Commands must be used in the designated draft channel (if configured)
-• After 1 hour in a draft, you'll be pinged to confirm. Respond with \`!yes\` within 5 minutes or \`!leave <set_code>\` to leave
+• After 1 hour in a draft (without a queue timeout), you'll receive a DM to confirm. Respond in DMs with \`!yes\` within 5 minutes or \`!leave <set_code>\` to leave
 • Players are automatically removed if they don't respond to the inactivity reminder
 • Drafts are cleared when the bot goes offline`;
 
@@ -181,48 +185,50 @@ client.on(djs.Events.MessageCreate, async (message) => {
     return;
   }
 
-  // Draft command: !draft <set_code> or !draft <set_code1> <set_code2> <set_code3>
+  // Draft command: !draft <set_code> or !draft <set_code> <hours>
+  // where hours (1-12) removes you from queue if it hasn't reached 8 players in that time
   if (command === "!draft") {
     // Check if command is from allowed channel
     if (!isAllowedDraftChannel(message)) {
       return;
     }
-    
-    // Parse set codes (expect 1 or 3)
-    const setCodes = parts.slice(1).filter((part) => part.length > 0);
-    
-    if (setCodes.length === 0) {
+
+    // Parse set code (1 required); optional number 1-12 at end = queue timeout in hours
+    const rawParts = parts.slice(1).filter((part) => part.length > 0);
+    let queueTimeoutHours: number | undefined;
+    let setCode: string;
+
+    const lastPart = rawParts[rawParts.length - 1];
+    const timeoutNum = lastPart ? parseInt(lastPart, 10) : NaN;
+    if (
+      rawParts.length >= 2 &&
+      !isNaN(timeoutNum) &&
+      timeoutNum >= 1 &&
+      timeoutNum <= 12
+    ) {
+      queueTimeoutHours = timeoutNum;
+      setCode = rawParts[0];
+    } else {
+      setCode = rawParts[0] ?? "";
+    }
+
+    if (!setCode) {
       await message.reply(
-        "Please provide 1 or 3 set codes. Examples: `!draft TLA` or `!draft TLA FIN DFT`",
+        "Please provide a set code. Examples: `!draft TLA` or `!draft AGL 4` (4 hour queue timeout)",
       );
       return;
     }
 
-    if (setCodes.length !== 1 && setCodes.length !== 3) {
+    const upperCode = setCode.toUpperCase();
+    if (upperCode.length !== 3) {
       await message.reply(
-        "Please provide exactly 1 or 3 set codes. Examples: `!draft TLA` or `!draft TLA FIN DFT`",
+        `Invalid code: \`${setCode}\`. Set code must be exactly 3 letters.`,
       );
       return;
     }
 
-    // Validate all codes are 3 letters
-    const upperCodes = setCodes.map((code) => code.toUpperCase());
-    for (const code of upperCodes) {
-      if (code.length !== 3) {
-        await message.reply(
-          `Invalid code: \`${code}\`. All set codes must be exactly 3 letters.`,
-        );
-        return;
-      }
-    }
-
-    // Create draft key: single code stays as-is, multiple codes joined with dashes
-    const draftKey = upperCodes.length === 1 
-      ? upperCodes[0] 
-      : upperCodes.join("-");
-    
-    // Display format for messages
-    const draftDisplay = upperCodes.join(" ");
+    const draftKey = upperCode;
+    const draftDisplay = upperCode;
 
     // Check if user is already in the draft
     const existingDraft = getAllDrafts().get(draftKey);
@@ -252,6 +258,7 @@ client.on(djs.Events.MessageCreate, async (message) => {
       textChannel,
       client,
       pretend,
+      queueTimeoutHours,
     );
 
     if (!wasAdded) {
@@ -262,8 +269,11 @@ client.on(djs.Events.MessageCreate, async (message) => {
     }
 
     const count = getPlayerCount(draftKey);
+    const timeoutNote = queueTimeoutHours !== undefined
+      ? ` You will be removed if the queue doesn't reach 8 in ${queueTimeoutHours} hour(s).`
+      : "";
     await message.reply(
-      `${message.author} has joined \`${draftDisplay}\`.\nCurrent players: **${count}**`,
+      `${message.author} has joined \`${draftDisplay}\`.\nCurrent players: **${count}**${timeoutNote}`,
     );
 
     // Send notifications at 5+ players
@@ -298,48 +308,31 @@ client.on(djs.Events.MessageCreate, async (message) => {
     return;
   }
 
-  // Leave command: !leave <set_code> or !leave <set_code1> <set_code2> <set_code3>
+  // Leave command: !leave <set_code>
   if (command === "!leave") {
     // Check if command is from allowed channel
     if (!isAllowedDraftChannel(message)) {
       return;
     }
-    
-    // Parse set codes (expect 1 or 3, matching the draft format)
-    const setCodes = parts.slice(1).filter((part) => part.length > 0);
-    
-    if (setCodes.length === 0) {
+
+    const setCode = parts[1];
+    if (!setCode) {
       await message.reply(
-        "Usage: `!leave TLA` or `!leave TLA FIN DFT` — remove yourself from that draft",
+        "Usage: `!leave TLA` — remove yourself from that draft",
       );
       return;
     }
 
-    if (setCodes.length !== 1 && setCodes.length !== 3) {
+    const upperCode = setCode.toUpperCase();
+    if (upperCode.length !== 3) {
       await message.reply(
-        "Please provide exactly 1 or 3 set codes to match the draft format.",
+        `Invalid code: \`${setCode}\`. Set code must be exactly 3 letters.`,
       );
       return;
     }
 
-    // Validate all codes are 3 letters
-    const upperCodes = setCodes.map((code) => code.toUpperCase());
-    for (const code of upperCodes) {
-      if (code.length !== 3) {
-        await message.reply(
-          `Invalid code: \`${code}\`. All set codes must be exactly 3 letters.`,
-        );
-        return;
-      }
-    }
-
-    // Create draft key: single code stays as-is, multiple codes joined with dashes
-    const draftKey = upperCodes.length === 1 
-      ? upperCodes[0] 
-      : upperCodes.join("-");
-    
-    // Display format for messages
-    const draftDisplay = upperCodes.join(" ");
+    const draftKey = upperCode;
+    const draftDisplay = upperCode;
 
     const draft = getAllDrafts().get(draftKey);
     if (!draft) {
@@ -398,7 +391,7 @@ client.on(djs.Events.MessageCreate, async (message) => {
     const messageLines = ["**Active Drafts:**"];
     for (const [draftKey, players] of allDrafts) {
       // Convert draft key to display format (dash-separated to space-separated)
-      const draftDisplay = draftKey.includes("-") 
+      const draftDisplay = draftKey.includes("-")
         ? draftKey.split("-").join(" ")
         : draftKey;
       messageLines.push(`- \`${draftDisplay}\`: ${players.size} player(s)`);
@@ -414,42 +407,24 @@ client.on(djs.Events.MessageCreate, async (message) => {
       return;
     }
 
-    // Parse set code
     const setCode = parts[1];
     if (!setCode) {
       await message.reply(
-        "Please provide a set code. Usage: `!notify TLA` or `!notify TLA FIN DFT`",
+        "Please provide a set code. Usage: `!notify TLA`",
       );
       return;
     }
 
-    // Validate set code format (can be 1 or 3 codes, matching draft format)
-    const setCodes = parts.slice(1).filter((part) => part.length > 0);
-    if (setCodes.length !== 1 && setCodes.length !== 3) {
+    const upperCode = setCode.toUpperCase();
+    if (upperCode.length !== 3) {
       await message.reply(
-        "Please provide exactly 1 or 3 set codes. Examples: `!notify TLA` or `!notify TLA FIN DFT`",
+        `Invalid code: \`${setCode}\`. Set code must be exactly 3 letters.`,
       );
       return;
     }
 
-    // Validate all codes are 3 letters
-    const upperCodes = setCodes.map((code) => code.toUpperCase());
-    for (const code of upperCodes) {
-      if (code.length !== 3) {
-        await message.reply(
-          `Invalid code: \`${code}\`. All set codes must be exactly 3 letters.`,
-        );
-        return;
-      }
-    }
-
-    // Create draft key: single code stays as-is, multiple codes joined with dashes
-    const draftKey = upperCodes.length === 1 
-      ? upperCodes[0] 
-      : upperCodes.join("-");
-    
-    // Display format for messages
-    const draftDisplay = upperCodes.join(" ");
+    const draftKey = upperCode;
+    const draftDisplay = upperCode;
 
     if (pretend) {
       await message.reply(
@@ -461,8 +436,8 @@ client.on(djs.Events.MessageCreate, async (message) => {
     optInForNotifications(message.author.id, draftKey);
     await message.reply(
       `✅ You've been opted in for notifications for \`${draftDisplay}\`. ` +
-      `You'll receive a DM when the queue reaches 5+ players (once every 12 hours). ` +
-      `Use \`!reset ${draftDisplay}\` to reset your notification timer.`,
+        `You'll receive a DM when the queue reaches 5+ players (once every 12 hours). ` +
+        `Use \`!reset ${draftDisplay}\` to reset your notification timer.`,
     );
     return;
   }
@@ -474,40 +449,24 @@ client.on(djs.Events.MessageCreate, async (message) => {
       return;
     }
 
-    // Parse set code
-    const setCodes = parts.slice(1).filter((part) => part.length > 0);
-    if (setCodes.length === 0) {
+    const setCode = parts[1];
+    if (!setCode) {
       await message.reply(
-        "Please provide a set code. Usage: `!reset TLA` or `!reset TLA FIN DFT`",
+        "Please provide a set code. Usage: `!reset TLA`",
       );
       return;
     }
 
-    if (setCodes.length !== 1 && setCodes.length !== 3) {
+    const upperCode = setCode.toUpperCase();
+    if (upperCode.length !== 3) {
       await message.reply(
-        "Please provide exactly 1 or 3 set codes. Examples: `!reset TLA` or `!reset TLA FIN DFT`",
+        `Invalid code: \`${setCode}\`. Set code must be exactly 3 letters.`,
       );
       return;
     }
 
-    // Validate all codes are 3 letters
-    const upperCodes = setCodes.map((code) => code.toUpperCase());
-    for (const code of upperCodes) {
-      if (code.length !== 3) {
-        await message.reply(
-          `Invalid code: \`${code}\`. All set codes must be exactly 3 letters.`,
-        );
-        return;
-      }
-    }
-
-    // Create draft key: single code stays as-is, multiple codes joined with dashes
-    const draftKey = upperCodes.length === 1 
-      ? upperCodes[0] 
-      : upperCodes.join("-");
-    
-    // Display format for messages
-    const draftDisplay = upperCodes.join(" ");
+    const draftKey = upperCode;
+    const draftDisplay = upperCode;
 
     if (pretend) {
       await message.reply(
@@ -520,12 +479,12 @@ client.on(djs.Events.MessageCreate, async (message) => {
     if (wasReset) {
       await message.reply(
         `✅ Your notification timer for \`${draftDisplay}\` has been reset. ` +
-        `You can now receive notifications again if the queue reaches 5+ players.`,
+          `You can now receive notifications again if the queue reaches 5+ players.`,
       );
     } else {
       await message.reply(
         `❌ You haven't opted in for notifications for \`${draftDisplay}\`. ` +
-        `Use \`!notify ${draftDisplay}\` to opt in first.`,
+          `Use \`!notify ${draftDisplay}\` to opt in first.`,
       );
     }
     return;
@@ -538,40 +497,24 @@ client.on(djs.Events.MessageCreate, async (message) => {
       return;
     }
 
-    // Parse set code
-    const setCodes = parts.slice(1).filter((part) => part.length > 0);
-    if (setCodes.length === 0) {
+    const setCode = parts[1];
+    if (!setCode) {
       await message.reply(
-        "Please provide a set code. Usage: `!cancel TLA` or `!cancel TLA FIN DFT`",
+        "Please provide a set code. Usage: `!cancel TLA`",
       );
       return;
     }
 
-    if (setCodes.length !== 1 && setCodes.length !== 3) {
+    const upperCode = setCode.toUpperCase();
+    if (upperCode.length !== 3) {
       await message.reply(
-        "Please provide exactly 1 or 3 set codes. Examples: `!cancel TLA` or `!cancel TLA FIN DFT`",
+        `Invalid code: \`${setCode}\`. Set code must be exactly 3 letters.`,
       );
       return;
     }
 
-    // Validate all codes are 3 letters
-    const upperCodes = setCodes.map((code) => code.toUpperCase());
-    for (const code of upperCodes) {
-      if (code.length !== 3) {
-        await message.reply(
-          `Invalid code: \`${code}\`. All set codes must be exactly 3 letters.`,
-        );
-        return;
-      }
-    }
-
-    // Create draft key: single code stays as-is, multiple codes joined with dashes
-    const draftKey = upperCodes.length === 1 
-      ? upperCodes[0] 
-      : upperCodes.join("-");
-    
-    // Display format for messages
-    const draftDisplay = upperCodes.join(" ");
+    const draftKey = upperCode;
+    const draftDisplay = upperCode;
 
     if (pretend) {
       await message.reply(
@@ -584,12 +527,12 @@ client.on(djs.Events.MessageCreate, async (message) => {
     if (wasOptedOut) {
       await message.reply(
         `✅ You've been opted out of notifications for \`${draftDisplay}\`. ` +
-        `You will no longer receive DMs for this set code.`,
+          `You will no longer receive DMs for this set code.`,
       );
     } else {
       await message.reply(
         `❌ You haven't opted in for notifications for \`${draftDisplay}\`. ` +
-        `Use \`!notify ${draftDisplay}\` to opt in first.`,
+          `Use \`!notify ${draftDisplay}\` to opt in first.`,
       );
     }
     return;
@@ -649,4 +592,3 @@ if (command === "bot") {
   console.log("Use --help for usage information");
   Deno.exit(1);
 }
-

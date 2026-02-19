@@ -11,7 +11,10 @@ const REMOVAL_DELAY_MS = 300 * 1000; // 5 minutes in milliseconds
  */
 export interface PlayerInfo {
   joinTime: Date;
+  /** Timer for 1hr inactivity check (DM to confirm); null if user has queue timeout */
   reminderTimerId: number | null;
+  /** Timer for queue timeout - removes player if queue hasn't reached 8 in N hours */
+  queueTimeoutTimerId: number | null;
 }
 
 /**
@@ -63,7 +66,8 @@ export function getAllDrafts(): Map<string, DraftState> {
 }
 
 /**
- * Starts the inactivity reminder timer for a player in a draft
+ * Starts the inactivity reminder timer for a player in a draft (users without queue timeout only).
+ * After 1 hour, DMs the user to confirm; listens for response in DMs.
  */
 export function startReminderTimer(
   formatAcronym: string,
@@ -79,25 +83,33 @@ export function startReminderTimer(
     }
 
     const userMention = `<@${userId}>`;
-    // Convert draft key to display format (dash-separated to space-separated)
     const draftDisplay = formatAcronym.includes("-")
       ? formatAcronym.split("-").join(" ")
       : formatAcronym;
-    
-    await channel.send(
-      `${userMention}, you have been in the \`${draftDisplay}\` draft for 1 hour. ` +
-        `Do you still want to stay? Respond with \`!yes\` to remain, or \`!leave ${draftDisplay}\` to leave the draft.`,
-    );
 
-    // Wait for response - accept both !yes and !leave with either format (dash or space separated)
-    const collector = channel.createMessageCollector({
+    const reminderMessage =
+      `You have been in the \`${draftDisplay}\` draft for 1 hour. ` +
+      `Do you still want to stay? Respond with \`!yes\` to remain, or \`!leave ${draftDisplay}\` to leave the draft.`;
+
+    let responseChannel: djs.TextBasedChannel;
+    try {
+      const user = await client.users.fetch(userId);
+      const dmChannel = await user.createDM();
+      await dmChannel.send(reminderMessage);
+      responseChannel = dmChannel;
+    } catch (error) {
+      // DM failed (user has DMs disabled, etc.) - fall back to channel
+      console.error(`Failed to DM user ${userId} for inactivity check:`, error);
+      await channel.send(`${userMention}, ${reminderMessage}`);
+      responseChannel = channel;
+    }
+
+    const collector = responseChannel.createMessageCollector({
       filter: (m) => {
         if (m.author.id !== userId) return false;
         const content = m.content.toLowerCase().trim();
         if (content === "!yes") return true;
-        // Check for !leave with space-separated format
         if (content === `!leave ${draftDisplay.toLowerCase()}`) return true;
-        // Check for !leave with dash-separated format (for backward compatibility)
         if (content === `!leave ${formatAcronym.toLowerCase()}`) return true;
         return false;
       },
@@ -106,14 +118,12 @@ export function startReminderTimer(
     });
 
     collector.on("collect", async (message) => {
-      collector.stop(); // Stop collecting after first message
-      
+      collector.stop();
+
       if (message.content.toLowerCase() === "!yes") {
-        // User wants to stay - restart timer
         const draft = getDraft(formatAcronym);
         if (draft && draft.has(userId)) {
           const playerInfo = draft.get(userId)!;
-          // Start new timer
           playerInfo.reminderTimerId = startReminderTimer(
             formatAcronym,
             userId,
@@ -121,36 +131,47 @@ export function startReminderTimer(
             client,
             pretend,
           );
-          await channel.send(
-            `${userMention}, your timer has been reset for 1 more hour.`,
-          );
+          await message.reply("Your timer has been reset for 1 more hour.");
         }
       } else {
-        // User wants to leave
         await leaveDraft(formatAcronym, userId, channel, pretend);
+        if (responseChannel.isDMBased()) {
+          await message.reply("You've left the draft.");
+        }
+        await channel.send(
+          `${userMention} has left \`${draftDisplay}\`.\nRemaining players: **${
+            getPlayerCount(formatAcronym)
+          }**`,
+        );
+        const remainingDraft = getDraft(formatAcronym);
+        if (remainingDraft?.size === 0) {
+          drafts.delete(formatAcronym);
+          await channel.send(
+            `The \`${draftDisplay}\` draft is now empty and has been removed.`,
+          );
+        }
       }
     });
 
     collector.on("end", async (collected) => {
       if (collected.size === 0) {
-        // No response - remove for inactivity
         await leaveDraft(formatAcronym, userId, channel, pretend);
         await channel.send(
-          `${userMention} has been removed from \`${formatAcronym}\` due to inactivity.`,
+          `${userMention} has been removed from \`${draftDisplay}\` due to inactivity.`,
         );
 
         const draft = getDraft(formatAcronym);
         if (!draft || draft.size === 0) {
           drafts.delete(formatAcronym);
           await channel.send(
-            `The \`${formatAcronym}\` draft is now empty and has been removed.`,
+            `The \`${draftDisplay}\` draft is now empty and has been removed.`,
           );
         }
       }
     });
   }, REMINDER_DELAY_MS);
 
-  return timerId as unknown as number; // Deno/Node setTimeout returns a number
+  return timerId as unknown as number;
 }
 
 /**
@@ -163,7 +184,58 @@ export function cancelReminderTimer(timerId: number | null): void {
 }
 
 /**
+ * Cancels a queue timeout timer
+ */
+function cancelQueueTimeoutTimer(timerId: number | null): void {
+  if (timerId !== null) {
+    clearTimeout(timerId);
+  }
+}
+
+/**
+ * Starts the queue timeout timer - removes player if queue hasn't reached 8 in N hours
+ */
+function startQueueTimeoutTimer(
+  formatAcronym: string,
+  userId: string,
+  channel: djs.TextChannel,
+  pretend: boolean,
+  hours: number,
+): number {
+  const ms = hours * 60 * 60 * 1000;
+  const timerId = setTimeout(async () => {
+    const draft = getDraft(formatAcronym);
+    if (!draft || !draft.has(userId)) {
+      return; // Draft or player no longer exists (e.g., draft filled and closed)
+    }
+    if (draft.size >= 8) {
+      return; // Draft is full, don't remove
+    }
+
+    const userMention = `<@${userId}>`;
+    const draftDisplay = formatAcronym.includes("-")
+      ? formatAcronym.split("-").join(" ")
+      : formatAcronym;
+
+    await leaveDraft(formatAcronym, userId, channel, pretend);
+    await channel.send(
+      `${userMention} has been removed from \`${draftDisplay}\` after ${hours} hour(s) — the queue did not reach 8 players.`,
+    );
+
+    if (draft.size === 0) {
+      drafts.delete(formatAcronym);
+      await channel.send(
+        `The \`${draftDisplay}\` draft is now empty and has been removed.`,
+      );
+    }
+  }, ms);
+
+  return timerId as unknown as number;
+}
+
+/**
  * Adds a player to a draft
+ * @param queueTimeoutHours Optional 1-12; if set, player is removed after this many hours if queue hasn't reached 8
  */
 export function addPlayerToDraft(
   formatAcronym: string,
@@ -171,6 +243,7 @@ export function addPlayerToDraft(
   channel: djs.TextChannel,
   client: djs.Client,
   pretend: boolean,
+  queueTimeoutHours?: number,
 ): boolean {
   const draft = getOrCreateDraft(formatAcronym);
 
@@ -178,17 +251,33 @@ export function addPlayerToDraft(
     return false; // Player already in draft
   }
 
-  const reminderTimerId = startReminderTimer(
-    formatAcronym,
-    userId,
-    channel,
-    client,
-    pretend,
-  );
+  // Only start 1hr reminder for users without queue timeout (they have no auto-removal)
+  const reminderTimerId =
+    !queueTimeoutHours || queueTimeoutHours < 1 || queueTimeoutHours > 12
+      ? startReminderTimer(
+        formatAcronym,
+        userId,
+        channel,
+        client,
+        pretend,
+      )
+      : null;
+
+  const queueTimeoutTimerId =
+    queueTimeoutHours && queueTimeoutHours >= 1 && queueTimeoutHours <= 12
+      ? startQueueTimeoutTimer(
+        formatAcronym,
+        userId,
+        channel,
+        pretend,
+        queueTimeoutHours,
+      )
+      : null;
 
   draft.set(userId, {
     joinTime: new Date(),
     reminderTimerId,
+    queueTimeoutTimerId,
   });
 
   return true;
@@ -209,7 +298,10 @@ export async function leaveDraft(
   }
 
   const playerInfo = draft.get(userId)!;
-  cancelReminderTimer(playerInfo.reminderTimerId);
+  if (playerInfo.reminderTimerId !== null) {
+    cancelReminderTimer(playerInfo.reminderTimerId);
+  }
+  cancelQueueTimeoutTimer(playerInfo.queueTimeoutTimerId);
   draft.delete(userId);
 
   return true;
@@ -224,9 +316,12 @@ export function closeDraft(formatAcronym: string): void {
     return;
   }
 
-  // Cancel all reminder timers
+  // Cancel all reminder and queue timeout timers
   for (const playerInfo of draft.values()) {
-    cancelReminderTimer(playerInfo.reminderTimerId);
+    if (playerInfo.reminderTimerId !== null) {
+      cancelReminderTimer(playerInfo.reminderTimerId);
+    }
+    cancelQueueTimeoutTimer(playerInfo.queueTimeoutTimerId);
   }
 
   // Remove the draft
@@ -240,4 +335,3 @@ export function getPlayerCount(formatAcronym: string): number {
   const draft = getDraft(formatAcronym);
   return draft ? draft.size : 0;
 }
-
