@@ -75,6 +75,7 @@ export async function reportMatch(
     "UNFORMATTED_VALUE",
   );
 
+  const draftLower = draftName.toLowerCase();
   const values = response.values || [];
   let matchRowIndex: number | null = null;
 
@@ -87,7 +88,7 @@ export async function reportMatch(
     const p2 = String(row[4] ?? "").trim();
     const winner = String(row[5] ?? "").trim();
 
-    if (rowDraft !== draftName) continue;
+    if (rowDraft.toLowerCase() !== draftLower) continue;
     if (winner !== "") continue; // Already has a winner
 
     const pair = new Set([p1, p2]);

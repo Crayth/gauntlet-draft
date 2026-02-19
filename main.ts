@@ -122,9 +122,6 @@ function isAllowedDraftChannel(message: djs.Message): boolean {
  * Checks if the message is from the allowed matchmaking channel (if configured)
  */
 function isAllowedMatchmakingChannel(message: djs.Message): boolean {
-  if (!CONFIG.MATCHMAKING_CHANNEL_ID) {
-    return true; // If not configured, allow all channels
-  }
   return message.channel.id === CONFIG.MATCHMAKING_CHANNEL_ID;
 }
 

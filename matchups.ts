@@ -172,11 +172,13 @@ export async function getDraftStatus(
     "UNFORMATTED_VALUE",
   );
 
+  const draftLower = draftName.toLowerCase();
   const values = response.values || [];
   const rows: MatchupRow[] = [];
   for (let i = 0; i < values.length; i++) {
     const parsed = parseMatchupRow(values[i]);
-    if (parsed && parsed.draftName === draftName) {
+    console.log(parsed);
+    if (parsed && parsed.draftName.toLowerCase() === draftLower) {
       rows.push(parsed);
     }
   }
@@ -346,11 +348,12 @@ export async function createNextRoundIfReady(
     "UNFORMATTED_VALUE",
   );
 
+  const draftLower = draftName.toLowerCase();
   const values = response.values || [];
   const rows: MatchupRow[] = [];
   for (let i = 0; i < values.length; i++) {
     const parsed = parseMatchupRow(values[i]);
-    if (parsed && parsed.draftName === draftName) {
+    if (parsed && parsed.draftName.toLowerCase() === draftLower) {
       rows.push(parsed);
     }
   }
