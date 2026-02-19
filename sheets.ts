@@ -49,6 +49,33 @@ export function sheetsAppend(
 }
 
 /**
+ * Writes values to a Google Sheets range with retry logic.
+ *
+ * @param sheets - Authenticated Sheets client instance
+ * @param sheetId - The Google Sheets document ID
+ * @param range - The range to write to in A1 notation (e.g., "Sheet1!A1:C10")
+ * @param values - 2D array of values to write
+ * @param valueInputOption - RAW strings or USER_ENTERED; RAW is default here
+ * @returns Promise that resolves to the update response
+ */
+export function sheetsWrite(
+  sheets: Sheets,
+  sheetId: string,
+  range: string,
+  values: unknown[][],
+  valueInputOption?: "RAW" | "USER_ENTERED",
+) {
+  return withSmartRetry(() =>
+    sheets.spreadsheetsValuesUpdate(
+      range,
+      sheetId,
+      { values },
+      { valueInputOption: valueInputOption ?? "RAW" },
+    )
+  );
+}
+
+/**
  * Reads values from a Google Sheets range with retry logic.
  *
  * @param sheets - Authenticated Sheets client instance
@@ -86,4 +113,3 @@ export let sheets: Sheets;
  */
 export const initSheets = async () =>
   sheets ??= new Sheets((await auth.getApplicationDefault()).credential);
-

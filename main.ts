@@ -19,6 +19,9 @@ import {
   resetNotificationTimer,
   sendNotificationsForSetCode,
 } from "./notifications.ts";
+import { recordDraftToLog } from "./draft_log.ts";
+import { createRound1Matchups, getDraftStatus } from "./matchups.ts";
+import { reportMatch } from "./matches.ts";
 
 export { CONFIG };
 
@@ -116,6 +119,16 @@ function isAllowedDraftChannel(message: djs.Message): boolean {
 }
 
 /**
+ * Checks if the message is from the allowed matchmaking channel (if configured)
+ */
+function isAllowedMatchmakingChannel(message: djs.Message): boolean {
+  if (!CONFIG.MATCHMAKING_CHANNEL_ID) {
+    return true; // If not configured, allow all channels
+  }
+  return message.channel.id === CONFIG.MATCHMAKING_CHANNEL_ID;
+}
+
+/**
  * Ensures a user is in the Player Database. Should be called whenever a user
  * interacts with the bot to automatically add them if they don't exist.
  *
@@ -158,26 +171,34 @@ client.on(djs.Events.MessageCreate, async (message) => {
 
     const helpMessage = `**Available Commands:**
 
-\`!draft <set_code>\` - Join a draft queue
-  Examples: \`!draft TLA\` or \`!draft AGL 4\`
-  • Optional \`<hours>\` (1-12): Remove me if queue doesn't reach 8 in that time (e.g. \`!draft AGL 4\`)
-  • At 8 players: Draft closes with draftmancer.com link
+\`!draft <draft_name>\` - Join a draft queue
+  Examples: \`!draft TLA\` or \`!draft Pod1 4\`
+  • Draft name must be one word (no spaces), e.g. set code or Pod1
+  • Optional \`<hours>\` (1-12): Remove me if queue doesn't reach 8 in that time (e.g. \`!draft TLA 4\`)
+  • At 8 players: Draft closes with draftmancer.com link and is recorded for match reporting
 
-\`!leave <set_code>\` - Leave a draft queue
+\`!leave <draft_name>\` - Leave a draft queue
 
-\`!notify <set_code>\` - Opt in for DM notifications when queue reaches 5+ players (once per 12 hours)
+\`!notify <draft_name>\` - Opt in for DM notifications when queue reaches 5+ players (once per 12 hours)
 
-\`!reset <set_code>\` - Reset notification timer to receive notifications immediately
+\`!reset <draft_name>\` - Reset notification timer to receive notifications immediately
 
-\`!cancel <set_code>\` - Opt out of notifications
+\`!cancel <draft_name>\` - Opt out of notifications
 
 \`!available\` - List all active drafts and player counts
+
+\`!fire <draft_name>\` - *(Owner only, testing)* Close a queue early and record players to Draft Log
+
+\`!report <draft_name> @opponent 2-0\` or \`!report <draft_name> @opponent 2-1\` - Report a match result (you = winner, tagged = loser)
+
+\`!status <draft_name>\` - Show current round and matchup status
 
 \`!help\` - Show this help message
 
 **Notes:**
-• Commands must be used in the designated draft channel (if configured)
-• After 1 hour in a draft (without a queue timeout), you'll receive a DM to confirm. Respond in DMs with \`!yes\` within 5 minutes or \`!leave <set_code>\` to leave
+• Draft commands must be used in the designated draft channel (if configured)
+• Match reporting (\`!report\`) must be used in the designated matchmaking channel (if configured)
+• After 1 hour in a draft (without a queue timeout), you'll receive a DM to confirm. Respond in DMs with \`!yes\` within 5 minutes or \`!leave <draft_name>\` to leave
 • Players are automatically removed if they don't respond to the inactivity reminder
 • Drafts are cleared when the bot goes offline`;
 
@@ -185,7 +206,7 @@ client.on(djs.Events.MessageCreate, async (message) => {
     return;
   }
 
-  // Draft command: !draft <set_code> or !draft <set_code> <hours>
+  // Draft command: !draft <draft_name> or !draft <draft_name> <hours>
   // where hours (1-12) removes you from queue if it hasn't reached 8 players in that time
   if (command === "!draft") {
     // Check if command is from allowed channel
@@ -193,11 +214,12 @@ client.on(djs.Events.MessageCreate, async (message) => {
       return;
     }
 
-    // Parse set code (1 required); optional number 1-12 at end = queue timeout in hours
+    // Parse draft name (single token, no spaces); optional number 1-12 = queue timeout in hours
     const rawParts = parts.slice(1).filter((part) => part.length > 0);
     let queueTimeoutHours: number | undefined;
-    let setCode: string;
+    let draftName: string;
 
+    const firstPart = rawParts[0];
     const lastPart = rawParts[rawParts.length - 1];
     const timeoutNum = lastPart ? parseInt(lastPart, 10) : NaN;
     if (
@@ -207,28 +229,20 @@ client.on(djs.Events.MessageCreate, async (message) => {
       timeoutNum <= 12
     ) {
       queueTimeoutHours = timeoutNum;
-      setCode = rawParts[0];
+      draftName = firstPart ?? "";
     } else {
-      setCode = rawParts[0] ?? "";
+      draftName = firstPart ?? "";
     }
 
-    if (!setCode) {
+    if (!draftName) {
       await message.reply(
-        "Please provide a set code. Examples: `!draft TLA` or `!draft AGL 4` (4 hour queue timeout)",
+        "Please provide a draft name (one word, no spaces). Examples: `!draft TLA` or `!draft Pod1 4`",
       );
       return;
     }
 
-    const upperCode = setCode.toUpperCase();
-    if (upperCode.length !== 3) {
-      await message.reply(
-        `Invalid code: \`${setCode}\`. Set code must be exactly 3 letters.`,
-      );
-      return;
-    }
-
-    const draftKey = upperCode;
-    const draftDisplay = upperCode;
+    const draftKey = draftName;
+    const draftDisplay = draftKey;
 
     // Check if user is already in the draft
     const existingDraft = getAllDrafts().get(draftKey);
@@ -285,12 +299,17 @@ client.on(djs.Events.MessageCreate, async (message) => {
     if (count === 8) {
       const draft = getAllDrafts().get(draftKey);
       if (draft) {
-        const mentions = Array.from(draft.keys())
-          .map((uid) => `<@${uid}>`)
-          .join(" ");
+        const userIds = Array.from(draft.keys());
+        const mentions = userIds.map((uid) => `<@${uid}>`).join(" ");
         await message.reply(
           `🔥 Draft \`${draftDisplay}\` is FULL (**8 players**)!\n${mentions}`,
         );
+
+        // Record to Draft Log for match reporting
+        await recordDraftToLog(draftKey, userIds, client, pretend);
+
+        // Create Round 1 bracket (4 matchups) in Matchups sheet
+        await createRound1Matchups(draftKey, userIds, pretend, client);
 
         // Generate UUID for draftmancer.com session
         const draftUuid = crypto.randomUUID();
@@ -308,31 +327,23 @@ client.on(djs.Events.MessageCreate, async (message) => {
     return;
   }
 
-  // Leave command: !leave <set_code>
+  // Leave command: !leave <draft_name>
   if (command === "!leave") {
     // Check if command is from allowed channel
     if (!isAllowedDraftChannel(message)) {
       return;
     }
 
-    const setCode = parts[1];
-    if (!setCode) {
+    const draftName = parts[1];
+    if (!draftName) {
       await message.reply(
-        "Usage: `!leave TLA` — remove yourself from that draft",
+        "Usage: `!leave <draft_name>` — draft name is one word, e.g. `!leave TLA`",
       );
       return;
     }
 
-    const upperCode = setCode.toUpperCase();
-    if (upperCode.length !== 3) {
-      await message.reply(
-        `Invalid code: \`${setCode}\`. Set code must be exactly 3 letters.`,
-      );
-      return;
-    }
-
-    const draftKey = upperCode;
-    const draftDisplay = upperCode;
+    const draftKey = draftName;
+    const draftDisplay = draftName;
 
     const draft = getAllDrafts().get(draftKey);
     if (!draft) {
@@ -376,6 +387,189 @@ client.on(djs.Events.MessageCreate, async (message) => {
     return;
   }
 
+  // Fire command: !fire <draft_name> — testing only, owner-only. Closes a queue early and records to Draft Log.
+  if (command === "!fire") {
+    if (message.author.id !== CONFIG.OWNER_ID) {
+      return; // Silent ignore for non-owners
+    }
+    if (!isAllowedDraftChannel(message)) {
+      return;
+    }
+
+    const draftName = parts[1];
+    if (!draftName) {
+      await message.reply(
+        "Usage: `!fire <draft_name>` — closes the queue early and records players to Draft Log (testing).",
+      );
+      return;
+    }
+
+    const draftKey = draftName;
+    const draftDisplay = draftName;
+    const draft = getAllDrafts().get(draftKey);
+
+    if (!draft || draft.size === 0) {
+      await message.reply(
+        `There is no active \`${draftDisplay}\` draft to fire.`,
+      );
+      return;
+    }
+
+    if (!message.channel.isTextBased() || message.channel.isDMBased()) {
+      return;
+    }
+
+    const userIds = Array.from(draft.keys());
+    const count = userIds.length;
+    const mentions = userIds.map((uid) => `<@${uid}>`).join(" ");
+
+    await message.reply(
+      `🔥 Draft \`${draftDisplay}\` fired early (**${count} player(s)**)!\n${mentions}`,
+    );
+
+    await recordDraftToLog(draftKey, userIds, client, pretend);
+
+    if (userIds.length === 8) {
+      await createRound1Matchups(draftKey, userIds, pretend, client);
+    }
+
+    const draftUuid = crypto.randomUUID();
+    await message.reply(
+      `Please visit https://draftmancer.com/?session=${draftUuid} to start the draft.`,
+    );
+
+    closeDraft(draftKey);
+    await message.reply(
+      `Draft \`${draftDisplay}\` has closed and been removed.`,
+    );
+    return;
+  }
+
+  // Report command: !report <draft_name> @opponent 2-0 or 2-1 (only in matchmaking channel)
+  if (command === "!report") {
+    if (!isAllowedMatchmakingChannel(message)) {
+      return;
+    }
+
+    const draftName = parts[1];
+    const mentionedUsers = message.mentions.users.filter((u) => !u.bot);
+    const content = message.content.trim();
+    const resultMatch = content.match(/2-0|2-1/);
+
+    if (!draftName) {
+      await message.reply(
+        "Usage: `!report <draft_name> @opponent 2-0` or `!report <draft_name> @opponent 2-1`",
+      );
+      return;
+    }
+
+    if (mentionedUsers.size !== 1) {
+      await message.reply(
+        "Please tag exactly one player (your opponent, the loser).",
+      );
+      return;
+    }
+
+    const loserId = mentionedUsers.first()!.id;
+    if (loserId === message.author.id) {
+      await message.reply("You cannot report a match against yourself.");
+      return;
+    }
+
+    if (
+      !resultMatch || (resultMatch[0] !== "2-0" && resultMatch[0] !== "2-1")
+    ) {
+      await message.reply(
+        "Please include the result: `2-0` or `2-1` (you are the winner).",
+      );
+      return;
+    }
+
+    const result = resultMatch[0] as "2-0" | "2-1";
+    const winnerId = message.author.id;
+
+    const reportResult = await reportMatch(
+      draftName,
+      winnerId,
+      loserId,
+      result,
+      pretend,
+      client,
+    );
+
+    if (reportResult.ok) {
+      await message.reply(
+        pretend
+          ? `[PRETEND] Would record match: you beat <@${loserId}> ${result}.`
+          : `Match recorded: you beat <@${loserId}> ${result}.`,
+      );
+    } else {
+      await message.reply(reportResult.error);
+    }
+    return;
+  }
+
+  // Status command: !status <draft_name> (in matchmaking channel)
+  if (command === "!status") {
+    if (!isAllowedMatchmakingChannel(message)) {
+      return;
+    }
+
+    const draftName = parts[1];
+    if (!draftName) {
+      await message.reply(
+        "Usage: `!status <draft_name>` — shows current round and matchup status",
+      );
+      return;
+    }
+
+    const status = await getDraftStatus(draftName);
+
+    if (!status.ok) {
+      await message.reply(status.error);
+      return;
+    }
+
+    if ("complete" in status && status.complete) {
+      await message.reply(
+        `**\`${draftName}\`** — Tournament complete. All rounds finished.`,
+      );
+      return;
+    }
+
+    const { round, matches } = status;
+    const userIds = new Set<string>();
+    for (const m of matches) {
+      userIds.add(m.p1);
+      userIds.add(m.p2);
+      if (m.winner) userIds.add(m.winner);
+    }
+    const nameMap = new Map<string, string>();
+    for (const id of userIds) {
+      try {
+        const user = await client.users.fetch(id);
+        nameMap.set(id, user.username);
+      } catch {
+        nameMap.set(id, `Unknown`);
+      }
+    }
+    const name = (id: string) => nameMap.get(id) ?? `Unknown`;
+    const lines = matches.map((m) => {
+      if (m.completed && m.winner && m.result) {
+        return `Match ${m.matchNum}: ${name(m.p1)} vs ${name(m.p2)} — ${
+          name(m.winner)
+        } won ${m.result}`;
+      }
+      return `Match ${m.matchNum}: ${name(m.p1)} vs ${
+        name(m.p2)
+      } — In progress`;
+    });
+    await message.reply(
+      `**Round ${round} status for \`${draftName}\`:**\n${lines.join("\n")}`,
+    );
+    return;
+  }
+
   // Available command: !available
   if (command === "!available") {
     // Check if command is from allowed channel
@@ -400,31 +594,23 @@ client.on(djs.Events.MessageCreate, async (message) => {
     return;
   }
 
-  // Notify command: !notify <set_code>
+  // Notify command: !notify <draft_name>
   if (command === "!notify") {
     // Check if command is from allowed channel
     if (!isAllowedDraftChannel(message)) {
       return;
     }
 
-    const setCode = parts[1];
-    if (!setCode) {
+    const draftName = parts[1];
+    if (!draftName) {
       await message.reply(
-        "Please provide a set code. Usage: `!notify TLA`",
+        "Please provide a draft name (one word). Usage: `!notify TLA`",
       );
       return;
     }
 
-    const upperCode = setCode.toUpperCase();
-    if (upperCode.length !== 3) {
-      await message.reply(
-        `Invalid code: \`${setCode}\`. Set code must be exactly 3 letters.`,
-      );
-      return;
-    }
-
-    const draftKey = upperCode;
-    const draftDisplay = upperCode;
+    const draftKey = draftName;
+    const draftDisplay = draftName;
 
     if (pretend) {
       await message.reply(
@@ -442,31 +628,23 @@ client.on(djs.Events.MessageCreate, async (message) => {
     return;
   }
 
-  // Reset command: !reset <set_code>
+  // Reset command: !reset <draft_name>
   if (command === "!reset") {
     // Check if command is from allowed channel
     if (!isAllowedDraftChannel(message)) {
       return;
     }
 
-    const setCode = parts[1];
-    if (!setCode) {
+    const draftName = parts[1];
+    if (!draftName) {
       await message.reply(
-        "Please provide a set code. Usage: `!reset TLA`",
+        "Please provide a draft name (one word). Usage: `!reset TLA`",
       );
       return;
     }
 
-    const upperCode = setCode.toUpperCase();
-    if (upperCode.length !== 3) {
-      await message.reply(
-        `Invalid code: \`${setCode}\`. Set code must be exactly 3 letters.`,
-      );
-      return;
-    }
-
-    const draftKey = upperCode;
-    const draftDisplay = upperCode;
+    const draftKey = draftName;
+    const draftDisplay = draftName;
 
     if (pretend) {
       await message.reply(
@@ -490,31 +668,23 @@ client.on(djs.Events.MessageCreate, async (message) => {
     return;
   }
 
-  // Cancel command: !cancel <set_code>
+  // Cancel command: !cancel <draft_name>
   if (command === "!cancel") {
     // Check if command is from allowed channel
     if (!isAllowedDraftChannel(message)) {
       return;
     }
 
-    const setCode = parts[1];
-    if (!setCode) {
+    const draftName = parts[1];
+    if (!draftName) {
       await message.reply(
-        "Please provide a set code. Usage: `!cancel TLA`",
+        "Please provide a draft name (one word). Usage: `!cancel TLA`",
       );
       return;
     }
 
-    const upperCode = setCode.toUpperCase();
-    if (upperCode.length !== 3) {
-      await message.reply(
-        `Invalid code: \`${setCode}\`. Set code must be exactly 3 letters.`,
-      );
-      return;
-    }
-
-    const draftKey = upperCode;
-    const draftDisplay = upperCode;
+    const draftKey = draftName;
+    const draftDisplay = draftName;
 
     if (pretend) {
       await message.reply(

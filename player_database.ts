@@ -1,5 +1,33 @@
 import { CONFIG } from "./config.ts";
-import { sheets, sheetsRead, sheetsAppend } from "./sheets.ts";
+import { sheets, sheetsAppend, sheetsRead } from "./sheets.ts";
+
+/**
+ * Gets the Player Name for a Discord ID from the Player Database sheet.
+ *
+ * @param discordId - The Discord ID to look up
+ * @returns Promise that resolves to the player name, or null if not found
+ */
+export async function getPlayerName(discordId: string): Promise<string | null> {
+  try {
+    const response = await sheetsRead(
+      sheets,
+      CONFIG.LIVE_SHEET_ID,
+      "Player Database!A2:B",
+      "UNFORMATTED_VALUE",
+    );
+
+    const values = response.values || [];
+    for (const row of values) {
+      if (row && row.length >= 2 && row[1] === discordId) {
+        return String(row[0]);
+      }
+    }
+    return null;
+  } catch (error) {
+    console.error("Error getting player name:", error);
+    return null;
+  }
+}
 
 /**
  * Checks if a Discord ID exists in the Player Database sheet.
@@ -18,14 +46,14 @@ export async function playerExists(discordId: string): Promise<boolean> {
     );
 
     const values = response.values || [];
-    
+
     // Check if any row contains the Discord ID
     for (const row of values) {
       if (row && row.length > 0 && row[0] === discordId) {
         return true;
       }
     }
-    
+
     return false;
   } catch (error) {
     console.error("Error checking if player exists:", error);
@@ -49,7 +77,7 @@ export async function ensurePlayerInDatabase(
 ): Promise<boolean> {
   // Check if player already exists
   const exists = await playerExists(discordId);
-  
+
   if (exists) {
     return false; // Already exists, nothing to do
   }
@@ -73,4 +101,3 @@ export async function ensurePlayerInDatabase(
   console.log(`Added player: ${userName} (${discordId}) to Player Database`);
   return true;
 }
-

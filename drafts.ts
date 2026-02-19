@@ -286,12 +286,12 @@ export function addPlayerToDraft(
 /**
  * Removes a player from a draft
  */
-export async function leaveDraft(
+export function leaveDraft(
   formatAcronym: string,
   userId: string,
-  channel: djs.TextChannel,
-  pretend: boolean,
-): Promise<boolean> {
+  _channel: djs.TextChannel,
+  _pretend: boolean,
+): boolean {
   const draft = getDraft(formatAcronym);
   if (!draft || !draft.has(userId)) {
     return false; // Draft or player doesn't exist
