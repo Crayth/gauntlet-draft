@@ -321,12 +321,30 @@ client.on(djs.Events.MessageCreate, async (message) => {
         await recordDraftToLog(draftKey, userIds, client, pretend);
 
         // Create Round 1 bracket (4 matchups) in Matchups sheet
-        await createRound1Matchups(draftKey, userIds, pretend, client);
+        const seatOrder = await createRound1Matchups(
+          draftKey,
+          userIds,
+          pretend,
+          client,
+        );
+
+        // Build seat order text (1–8) for draftmancer
+        const seatLines: string[] = [];
+        for (let i = 0; i < seatOrder.length; i++) {
+          const name =
+            (await getPlayerNameFromDraftLog(seatOrder[i], draftKey)) ??
+            `<@${seatOrder[i]}>`;
+          seatLines.push(`${i + 1}. ${name}`);
+        }
+        const seatText =
+          seatLines.length > 0
+            ? `\n**Seat order:**\n${seatLines.join("\n")}`
+            : "";
 
         // Generate UUID for draftmancer.com session
         const draftUuid = crypto.randomUUID();
         await message.reply(
-          `Please visit https://draftmancer.com/?session=${draftUuid} to start the draft.`,
+          `Please visit https://draftmancer.com/?session=${draftUuid} to start the draft.${seatText}`,
         );
 
         // Close the draft

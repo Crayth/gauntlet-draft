@@ -55,6 +55,24 @@ async function ensureMatchupsHeaders(): Promise<void> {
 }
 
 /**
+ * Seat order for draftmancer: Match 1 has P1→1,P2→5; Match 2 has P1→3,P2→7;
+ * Match 3 has P1→2,P2→6; Match 4 has P1→4,P2→8.
+ * Returns Discord IDs in seat order 1–8.
+ */
+function buildSeatOrder(shuffled: string[]): string[] {
+  return [
+    shuffled[0], // Match 1 P1 → seat 1
+    shuffled[4], // Match 3 P1 → seat 2
+    shuffled[2], // Match 2 P1 → seat 3
+    shuffled[6], // Match 4 P1 → seat 4
+    shuffled[1], // Match 1 P2 → seat 5
+    shuffled[5], // Match 3 P2 → seat 6
+    shuffled[3], // Match 2 P2 → seat 7
+    shuffled[7], // Match 4 P2 → seat 8
+  ];
+}
+
+/**
  * Creates Round 1 matchups (4 matches) for an 8-player draft.
  * Randomizes the pairings: Match 1 = P1 vs P2, Match 2 = P3 vs P4, etc.
  * Player 1 and Player 2 store Discord IDs for linking to Draft Log and Matches.
@@ -63,30 +81,32 @@ async function ensureMatchupsHeaders(): Promise<void> {
  * @param userIds - The 8 Discord user IDs (will be randomized and paired)
  * @param pretend - If true, only logs what would be done
  * @param client - Discord client for sending round announcement (optional)
+ * @returns The 8 Discord IDs in seat order 1–8 for draftmancer, or empty array if pretend/failed
  */
 export async function createRound1Matchups(
   draftName: string,
   userIds: readonly string[],
   pretend: boolean,
   client?: djs.Client,
-): Promise<void> {
+): Promise<string[]> {
   if (userIds.length !== 8) {
     console.error(
       `createRound1Matchups requires 8 players, got ${userIds.length}`,
     );
-    return;
+    return [];
   }
+
+  const shuffled = shuffleArray(Array.from(userIds));
+  const seatOrder = buildSeatOrder(shuffled);
 
   if (pretend) {
     console.log(
       `[PRETEND] Would create Round 1 matchups for draft "${draftName}"`,
     );
-    return;
+    return seatOrder;
   }
 
   await ensureMatchupsHeaders();
-
-  const shuffled = shuffleArray(Array.from(userIds));
 
   const rows: (string | number)[][] = [];
   for (let i = 0; i < 4; i++) {
@@ -117,6 +137,8 @@ export async function createRound1Matchups(
   if (client) {
     await sendRoundAnnouncement(client, draftName, 1, rows);
   }
+
+  return seatOrder;
 }
 
 /** Match row: [Draft Name, Round, Match #, Player 1, Player 2, Winner, Match Result] */
