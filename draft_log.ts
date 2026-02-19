@@ -35,6 +35,71 @@ async function ensureDraftLogHeaders(): Promise<void> {
 }
 
 /**
+ * Gets the Player Name from Draft Log for a Discord ID in a specific draft.
+ * Draft Log columns: A=Player Name, B=Discord ID, C=Draft Name.
+ *
+ * @returns Player Name, or null if not found
+ */
+export async function getPlayerNameFromDraftLog(
+  discordId: string,
+  draftName: string,
+): Promise<string | null> {
+  try {
+    const response = await sheetsRead(
+      sheets,
+      CONFIG.LIVE_SHEET_ID,
+      `${DRAFT_LOG_SHEET}!A2:C`,
+      "UNFORMATTED_VALUE",
+    );
+    const values = response.values || [];
+    for (const row of values) {
+      if (row && row.length >= 3) {
+        const playerName = String(row[0] ?? "").trim();
+        const rowDiscordId = String(row[1] ?? "").trim();
+        const rowDraftName = String(row[2] ?? "").trim();
+        if (
+          rowDiscordId === discordId &&
+          rowDraftName.toLowerCase() === draftName.toLowerCase()
+        ) {
+          return playerName || null;
+        }
+      }
+    }
+    return null;
+  } catch (error) {
+    console.error("Error looking up player name from Draft Log:", error);
+    return null;
+  }
+}
+
+/**
+ * Checks if a draft name already exists in the Draft Log (case-sensitive).
+ * Used to prevent duplicate draft names that would mix pod data.
+ */
+export async function draftNameExistsInLog(
+  draftName: string,
+): Promise<boolean> {
+  try {
+    const response = await sheetsRead(
+      sheets,
+      CONFIG.LIVE_SHEET_ID,
+      `${DRAFT_LOG_SHEET}!C2:C`,
+      "UNFORMATTED_VALUE",
+    );
+    const values = response.values || [];
+    for (const row of values) {
+      if (row && row.length > 0 && String(row[0] ?? "").trim() === draftName) {
+        return true;
+      }
+    }
+    return false;
+  } catch (error) {
+    console.error("Error checking draft name uniqueness:", error);
+    return false; // On error, allow (don't block due to sheet read failure)
+  }
+}
+
+/**
  * Records a completed draft pod to the Draft Log sheet.
  * Each of the 8 players gets a row: Player Name, Discord ID, Draft Name.
  *

@@ -19,7 +19,11 @@ import {
   resetNotificationTimer,
   sendNotificationsForSetCode,
 } from "./notifications.ts";
-import { recordDraftToLog } from "./draft_log.ts";
+import {
+  draftNameExistsInLog,
+  getPlayerNameFromDraftLog,
+  recordDraftToLog,
+} from "./draft_log.ts";
 import { createRound1Matchups, getDraftStatus } from "./matchups.ts";
 import { reportMatch } from "./matches.ts";
 
@@ -248,6 +252,17 @@ client.on(djs.Events.MessageCreate, async (message) => {
         `${message.author}, you are already in \`${draftDisplay}\`.`,
       );
       return;
+    }
+
+    // Check if draft name is already used (completed pod in Draft Log)
+    if (!existingDraft) {
+      const nameTaken = await draftNameExistsInLog(draftKey);
+      if (nameTaken) {
+        await message.reply(
+          `Draft name \`${draftDisplay}\` has already been used. Please choose a different name.`,
+        );
+        return;
+      }
     }
 
     // Add player to draft
@@ -543,14 +558,10 @@ client.on(djs.Events.MessageCreate, async (message) => {
     }
     const nameMap = new Map<string, string>();
     for (const id of userIds) {
-      try {
-        const user = await client.users.fetch(id);
-        nameMap.set(id, user.username);
-      } catch {
-        nameMap.set(id, `Unknown`);
-      }
+      const playerName = await getPlayerNameFromDraftLog(id, draftName);
+      nameMap.set(id, playerName ?? "Unknown");
     }
-    const name = (id: string) => nameMap.get(id) ?? `Unknown`;
+    const name = (id: string) => nameMap.get(id) ?? "Unknown";
     const lines = matches.map((m) => {
       if (m.completed && m.winner && m.result) {
         return `Match ${m.matchNum}: ${name(m.p1)} vs ${name(m.p2)} — ${

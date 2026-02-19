@@ -1,5 +1,6 @@
 import * as djs from "discord.js";
 import { CONFIG } from "./config.ts";
+import { getPlayerNameFromDraftLog } from "./draft_log.ts";
 import { sheets, sheetsAppend, sheetsRead, sheetsWrite } from "./sheets.ts";
 
 const MATCHUPS_SHEET = "Matchups";
@@ -301,6 +302,49 @@ function buildRound3Rows(
 }
 
 /**
+ * Sends the final pod standings (wins per player, sorted by most wins) to the matchmaking channel.
+ */
+async function sendPodFinalStandings(
+  client: djs.Client,
+  draftName: string,
+  allRows: MatchupRow[],
+): Promise<void> {
+  if (!CONFIG.MATCHMAKING_CHANNEL_ID) return;
+  const winCounts = new Map<string, number>();
+  for (const row of allRows) {
+    if (row.winner) {
+      winCounts.set(row.winner, (winCounts.get(row.winner) ?? 0) + 1);
+    }
+  }
+  const sorted = [...winCounts.entries()].sort((a, b) => b[1] - a[1]);
+
+  const nameMap = new Map<string, string>();
+  for (const [userId] of sorted) {
+    const name = await getPlayerNameFromDraftLog(userId, draftName);
+    nameMap.set(userId, name ?? "Unknown");
+  }
+
+  const lines = sorted.map(
+    ([userId, wins]) =>
+      `${nameMap.get(userId) ?? "Unknown"}: ${wins} win${
+        wins === 1 ? "" : "s"
+      }`,
+  );
+
+  try {
+    const channel = await client.channels.fetch(CONFIG.MATCHMAKING_CHANNEL_ID);
+    if (!channel?.isTextBased() || channel.isDMBased()) return;
+
+    const message = `**\`${draftName}\` pod complete — final standings:**\n${
+      lines.join("\n")
+    }`;
+    await channel.send(message);
+  } catch (error) {
+    console.error("Failed to send pod final standings:", error);
+  }
+}
+
+/**
  * Sends an announcement of round matchups to the matchmaking channel.
  */
 async function sendRoundAnnouncement(
@@ -363,6 +407,11 @@ export async function createNextRoundIfReady(
 
   const r1Complete = r1.length === 4 && r1.every((r) => r.winner !== "");
   const r2Complete = r2.length === 4 && r2.every((r) => r.winner !== "");
+  const r3Complete = r3.length === 4 && r3.every((r) => r.winner !== "");
+
+  if (r3Complete && client) {
+    await sendPodFinalStandings(client, draftName, rows);
+  }
 
   if (r1Complete && r2.length === 0) {
     if (pretend) {
