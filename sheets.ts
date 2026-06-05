@@ -1,3 +1,4 @@
+import { delay } from "@std/async";
 import { load } from "@std/dotenv";
 import { auth, Sheets } from "sheets";
 import { withRetry } from "./retry.ts";
@@ -5,20 +6,43 @@ import { GoogleApiError } from "googleapis";
 
 export const env = await load({ export: true });
 
+/** Minimum gap between Sheets API calls (~40 requests/min). */
+const MIN_REQUEST_INTERVAL_MS = 1_500;
+
+let lastRequestAt = 0;
+let requestQueue: Promise<unknown> = Promise.resolve();
+
+/**
+ * Serializes Sheets API calls with a minimum delay between requests.
+ */
+function throttleSheetsRequest<T>(operation: () => Promise<T>): Promise<T> {
+  const result = requestQueue.then(async () => {
+    const elapsed = Date.now() - lastRequestAt;
+    if (elapsed < MIN_REQUEST_INTERVAL_MS) {
+      await delay(MIN_REQUEST_INTERVAL_MS - elapsed);
+    }
+    lastRequestAt = Date.now();
+    return await operation();
+  });
+  requestQueue = result.then(() => undefined, () => undefined);
+  return result;
+}
+
 function withSmartRetry<T>(
   operation: (disable: () => void) => Promise<T>,
 ): Promise<T> {
-  return withRetry(async (disable) => {
-    try {
-      return await operation(disable);
-    } catch (e) {
-      if (e instanceof GoogleApiError && e.code === 400) {
-        // This won't succeed on a retry, so disable retries
-        disable();
+  return throttleSheetsRequest(() =>
+    withRetry(async (disable) => {
+      try {
+        return await operation(disable);
+      } catch (e) {
+        if (e instanceof GoogleApiError && e.code === 400) {
+          disable();
+        }
+        throw e;
       }
-      throw e;
-    }
-  });
+    })
+  );
 }
 
 /**

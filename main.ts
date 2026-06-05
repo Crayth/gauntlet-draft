@@ -8,8 +8,9 @@ import { ensurePlayerInDatabase } from "./player_database.ts";
 import {
   addPlayerToDraft,
   closeDraft,
-  getAllDrafts,
+  getDraft,
   getPlayerCount,
+  getQueueUserIds,
   leaveDraft,
   removeDraftIfEmpty,
 } from "./drafts.ts";
@@ -17,10 +18,10 @@ import {
   optInForNotifications,
   optOutOfNotifications,
   resetNotificationTimer,
-  sendNotificationsForSetCode,
+  sendQueueNotifications,
 } from "./notifications.ts";
 import {
-  draftNameExistsInLog,
+  generatePodId,
   getPlayerNameFromDraftLog,
   recordDraftToLog,
 } from "./draft_log.ts";
@@ -79,11 +80,9 @@ let isClientReady = false;
 client.once(djs.Events.ClientReady, async (readyClient) => {
   console.log(`Ready! Logged in as ${readyClient.user.tag}`);
   isClientReady = true;
-  // Initialize Google Sheets client
   await initSheets();
   console.log("Google Sheets client initialized");
 
-  // Send startup message to draft channel if configured
   if (CONFIG.DRAFT_CHANNEL_ID) {
     try {
       const channel = await readyClient.channels.fetch(CONFIG.DRAFT_CHANNEL_ID);
@@ -94,14 +93,10 @@ client.once(djs.Events.ClientReady, async (readyClient) => {
       }
     } catch (error) {
       console.error("Error sending startup message:", error);
-      // Don't fail startup if we can't send the message
     }
   }
 });
 
-/**
- * Gets the display name for a Discord user, preferring guild display name if available.
- */
 function getUserDisplayName(
   user: djs.User,
   member: djs.GuildMember | null,
@@ -112,30 +107,17 @@ function getUserDisplayName(
   return user.username;
 }
 
-/**
- * Checks if the message is from the allowed draft channel (if configured)
- */
 function isAllowedDraftChannel(message: djs.Message): boolean {
   if (!CONFIG.DRAFT_CHANNEL_ID) {
-    return true; // If not configured, allow all channels
+    return true;
   }
   return message.channel.id === CONFIG.DRAFT_CHANNEL_ID;
 }
 
-/**
- * Checks if the message is from the allowed matchmaking channel (if configured)
- */
 function isAllowedMatchmakingChannel(message: djs.Message): boolean {
   return message.channel.id === CONFIG.MATCHMAKING_CHANNEL_ID;
 }
 
-/**
- * Ensures a user is in the Player Database. Should be called whenever a user
- * interacts with the bot to automatically add them if they don't exist.
- *
- * This function can be used by future bot features (button interactions, slash commands, etc.)
- * to automatically register users when they interact with the bot.
- */
 export async function ensureUserInDatabase(
   user: djs.User,
   member: djs.GuildMember | null,
@@ -145,61 +127,148 @@ export async function ensureUserInDatabase(
     await ensurePlayerInDatabase(userName, user.id, pretend);
   } catch (error) {
     console.error("Error ensuring user in database:", error);
-    // Don't throw - we don't want to break bot functionality if this fails
   }
 }
 
-client.on(djs.Events.MessageCreate, async (message) => {
-  // Ignore bot messages
-  if (message.author.bot) return;
+function buildDraftmancerSetLink(): string {
+  if (!CONFIG.QUEST_ANNOUNCEMENT_CHANNEL_ID) {
+    throw new Error(
+      "QUEST_ANNOUNCEMENT_CHANNEL_ID must be configured to link to the draft set message",
+    );
+  }
+  return `https://discord.com/channels/${CONFIG.GUILD_ID}/${CONFIG.QUEST_ANNOUNCEMENT_CHANNEL_ID}/${CONFIG.DRAFTMANCER_SET_MESSAGE_ID}`;
+}
 
-  // Only process commands in guild channels (not DMs)
+/**
+ * Fires the draft queue: records pod, creates matchups (if 8 players), posts Draftmancer link.
+ */
+async function fireDraftQueue(
+  reply: (content: string) => Promise<djs.Message>,
+): Promise<boolean> {
+  const draft = getDraft();
+  if (!draft || draft.size === 0) {
+    return false;
+  }
+
+  const userIds = getQueueUserIds();
+
+  let podId: string;
+  try {
+    podId = await generatePodId(pretend);
+  } catch (error) {
+    console.error("Failed to generate pod ID:", error);
+    await reply(
+      "Failed to generate a pod ID. The queue was not closed — please try again.",
+    );
+    return false;
+  }
+
+  let setLink: string;
+  try {
+    setLink = buildDraftmancerSetLink();
+  } catch (error) {
+    console.error("Failed to build draft set message link:", error);
+    await reply(
+      "Failed to build draft set message link. The queue was not closed — check bot configuration.",
+    );
+    return false;
+  }
+
+  const mentions = userIds.map((uid) => `<@${uid}>`).join(" ");
+
+  await reply(
+    `🔥 Draft pod \`${podId}\` is ready (**${userIds.length} players**)!\n${mentions}`,
+  );
+
+  await recordDraftToLog(podId, userIds, client, pretend);
+
+  let seatText = "";
+  if (userIds.length === 8) {
+    const seatOrder = await createRound1Matchups(
+      podId,
+      userIds,
+      pretend,
+      client,
+    );
+    const seatLines: string[] = [];
+    for (let i = 0; i < seatOrder.length; i++) {
+      const name = (await getPlayerNameFromDraftLog(seatOrder[i], podId)) ??
+        `<@${seatOrder[i]}>`;
+      seatLines.push(`${i + 1}. ${name}`);
+    }
+    if (seatLines.length > 0) {
+      seatText = `\n**Seat order:**\n${seatLines.join("\n")}`;
+    }
+  } else {
+    seatText = `\n*(Matchups will be created when a full 8-player pod fires.)*`;
+  }
+
+  await reply(
+    `Use the draftmancer link in the announcement channel to start the draft, and share with your fellow opponents: ${setLink}${seatText}\n\n` +
+      `Pod ID: \`${podId}\` — use \`!report ${podId} @opponent 2-0\` and \`!status ${podId}\` for match tracking.`,
+  );
+
+  closeDraft();
+  await reply(
+    "The draft queue has closed. Use `!draft` to join the next pod.",
+  );
+  return true;
+}
+
+function parseQueueTimeoutHours(parts: string[]): number | undefined {
+  const arg = parts[1];
+  if (!arg) return undefined;
+  const timeoutNum = parseInt(arg, 10);
+  if (!isNaN(timeoutNum) && timeoutNum >= 1 && timeoutNum <= 12) {
+    return timeoutNum;
+  }
+  return undefined;
+}
+
+client.on(djs.Events.MessageCreate, async (message) => {
+  if (message.author.bot) return;
   if (!message.guild || !message.member) return;
 
-  // Ensure the user is in the Player Database before processing any interaction
   await ensureUserInDatabase(message.author, message.member);
 
   const content = message.content.trim();
   const parts = content.split(/\s+/);
   const command = parts[0];
 
-  // Help command: !help
   if (command === "!help") {
-    // Check if command is from allowed channel
     if (!isAllowedDraftChannel(message)) {
       return;
     }
 
     const helpMessage = `**Available Commands:**
 
-\`!draft <draft_name>\` - Join a draft queue
-  Examples: \`!draft TLA\` or \`!draft Pod1 4\`
-  • Draft name must be one word (no spaces), e.g. set code or Pod1
-  • Optional \`<hours>\` (1-12): Remove me if queue doesn't reach 8 in that time (e.g. \`!draft TLA 4\`)
-  • At 8 players: Draft closes with draftmancer.com link and is recorded for match reporting
+\`!draft\` - Join the draft queue
+  • Optional \`<hours>\` (1-12): Remove me if queue doesn't reach 8 in that time (e.g. \`!draft 4\`)
+  • At 8 players: queue fires with a Draftmancer link and pod ID for match reporting
 
-\`!leave <draft_name>\` - Leave a draft queue
+\`!leave\` - Leave the draft queue
 
-\`!notify <draft_name>\` - Opt in for DM notifications when queue reaches 5+ players (once per 12 hours)
+\`!notify\` - Opt in for DM notifications when queue reaches 5+ players (once per 12 hours)
 
-\`!reset <draft_name>\` - Reset notification timer to receive notifications immediately
+\`!reset\` - Reset notification timer to receive notifications immediately
 
-\`!cancel <draft_name>\` - Opt out of notifications
+\`!cancel\` - Opt out of notifications
 
-\`!available\` - List all active drafts and player counts
+\`!available\` - Show current queue player count
 
-\`!report <draft_name> @opponent 2-0\` or \`!report <draft_name> @opponent 2-1\` - Report a match result (you = winner, tagged = loser)
+\`!report <pod_id> @opponent 2-0\` or \`!report <pod_id> @opponent 2-1\` - Report a match result (e.g. \`!report P4827 @opponent 2-0\`)
 
-\`!status <draft_name>\` - Show current round and matchup status (completed vs in progress, who won)
+\`!status <pod_id>\` - Show current round and matchup status
+
+\`!fire\` - (Testing) Fire the queue immediately with current players
 
 \`!help\` - Show this help message
 
 **Notes:**
 • Draft commands must be used in the designated draft channel (if configured)
 • \`!report\` and \`!status\` must be used in the designated matchmaking channel (if configured)
-• Draft names must be unique — each name can only be used once per pod (case-sensitive)
 • Round matchups and pod final standings are announced in the matchmaking channel
-• After 1 hour in a draft (without a queue timeout), you'll receive a DM to confirm. Respond in DMs with \`!yes\` within 5 minutes or \`!leave <draft_name>\` to leave
+• After 1 hour in the queue (without a queue timeout), you'll receive a DM to confirm. Respond in DMs with \`!yes\` within 5 minutes or \`!leave\` to leave
 • Players are automatically removed if they don't respond to the inactivity reminder
 • Drafts are cleared when the bot goes offline`;
 
@@ -207,65 +276,21 @@ client.on(djs.Events.MessageCreate, async (message) => {
     return;
   }
 
-  // Draft command: !draft <draft_name> or !draft <draft_name> <hours>
-  // where hours (1-12) removes you from queue if it hasn't reached 8 players in that time
   if (command === "!draft") {
-    // Check if command is from allowed channel
     if (!isAllowedDraftChannel(message)) {
       return;
     }
 
-    // Parse draft name (single token, no spaces); optional number 1-12 = queue timeout in hours
-    const rawParts = parts.slice(1).filter((part) => part.length > 0);
-    let queueTimeoutHours: number | undefined;
-    let draftName: string;
+    const queueTimeoutHours = parseQueueTimeoutHours(parts);
 
-    const firstPart = rawParts[0];
-    const lastPart = rawParts[rawParts.length - 1];
-    const timeoutNum = lastPart ? parseInt(lastPart, 10) : NaN;
-    if (
-      rawParts.length >= 2 &&
-      !isNaN(timeoutNum) &&
-      timeoutNum >= 1 &&
-      timeoutNum <= 12
-    ) {
-      queueTimeoutHours = timeoutNum;
-      draftName = firstPart ?? "";
-    } else {
-      draftName = firstPart ?? "";
-    }
-
-    if (!draftName) {
+    const existingDraft = getDraft();
+    if (existingDraft?.has(message.author.id)) {
       await message.reply(
-        "Please provide a draft name (one word, no spaces). Examples: `!draft TLA` or `!draft Pod1 4`",
+        `${message.author}, you are already in the draft queue.`,
       );
       return;
     }
 
-    const draftKey = draftName;
-    const draftDisplay = draftKey;
-
-    // Check if user is already in the draft
-    const existingDraft = getAllDrafts().get(draftKey);
-    if (existingDraft && existingDraft.has(message.author.id)) {
-      await message.reply(
-        `${message.author}, you are already in \`${draftDisplay}\`.`,
-      );
-      return;
-    }
-
-    // Check if draft name is already used (completed pod in Draft Log)
-    if (!existingDraft) {
-      const nameTaken = await draftNameExistsInLog(draftKey);
-      if (nameTaken) {
-        await message.reply(
-          `Draft name \`${draftDisplay}\` has already been used. Please choose a different name.`,
-        );
-        return;
-      }
-    }
-
-    // Add player to draft
     if (!message.channel.isTextBased() || message.channel.isDMBased()) {
       return;
     }
@@ -273,13 +298,12 @@ client.on(djs.Events.MessageCreate, async (message) => {
 
     if (pretend) {
       await message.reply(
-        `[PRETEND] Would add ${message.author} to draft \`${draftDisplay}\``,
+        `[PRETEND] Would add ${message.author} to the draft queue`,
       );
       return;
     }
 
     const wasAdded = addPlayerToDraft(
-      draftKey,
       message.author.id,
       textChannel,
       client,
@@ -289,104 +313,42 @@ client.on(djs.Events.MessageCreate, async (message) => {
 
     if (!wasAdded) {
       await message.reply(
-        `${message.author}, you are already in \`${draftDisplay}\`.`,
+        `${message.author}, you are already in the draft queue.`,
       );
       return;
     }
 
-    const count = getPlayerCount(draftKey);
+    const count = getPlayerCount();
     const timeoutNote = queueTimeoutHours !== undefined
       ? ` You will be removed if the queue doesn't reach 8 in ${queueTimeoutHours} hour(s).`
       : "";
     await message.reply(
-      `${message.author} has joined \`${draftDisplay}\`.\nCurrent players: **${count}**${timeoutNote}`,
+      `${message.author} has joined the draft queue.\nCurrent players: **${count}**${timeoutNote}`,
     );
 
-    // Send notifications at 5+ players
     if (count >= 5) {
-      await sendNotificationsForSetCode(draftKey, count, client);
+      await sendQueueNotifications(count, client);
     }
 
-    // Ping and close at 8 players
     if (count === 8) {
-      const draft = getAllDrafts().get(draftKey);
-      if (draft) {
-        const userIds = Array.from(draft.keys());
-        const mentions = userIds.map((uid) => `<@${uid}>`).join(" ");
-        await message.reply(
-          `🔥 Draft \`${draftDisplay}\` is FULL (**8 players**)!\n${mentions}`,
-        );
-
-        // Record to Draft Log for match reporting
-        await recordDraftToLog(draftKey, userIds, client, pretend);
-
-        // Create Round 1 bracket (4 matchups) in Matchups sheet
-        const seatOrder = await createRound1Matchups(
-          draftKey,
-          userIds,
-          pretend,
-          client,
-        );
-
-        // Build seat order text (1–8) for draftmancer
-        const seatLines: string[] = [];
-        for (let i = 0; i < seatOrder.length; i++) {
-          const name =
-            (await getPlayerNameFromDraftLog(seatOrder[i], draftKey)) ??
-            `<@${seatOrder[i]}>`;
-          seatLines.push(`${i + 1}. ${name}`);
-        }
-        const seatText =
-          seatLines.length > 0
-            ? `\n**Seat order:**\n${seatLines.join("\n")}`
-            : "";
-
-        // Generate UUID for draftmancer.com session
-        const draftUuid = crypto.randomUUID();
-        await message.reply(
-          `Please visit https://draftmancer.com/?session=${draftUuid} to start the draft.${seatText}`,
-        );
-
-        // Close the draft
-        closeDraft(draftKey);
-        await message.reply(
-          `Draft \`${draftDisplay}\` has closed and been removed.`,
-        );
-      }
+      await fireDraftQueue((text) => message.reply(text));
     }
     return;
   }
 
-  // Leave command: !leave <draft_name>
   if (command === "!leave") {
-    // Check if command is from allowed channel
     if (!isAllowedDraftChannel(message)) {
       return;
     }
 
-    const draftName = parts[1];
-    if (!draftName) {
-      await message.reply(
-        "Usage: `!leave <draft_name>` — draft name is one word, e.g. `!leave TLA`",
-      );
-      return;
-    }
-
-    const draftKey = draftName;
-    const draftDisplay = draftName;
-
-    const draft = getAllDrafts().get(draftKey);
+    const draft = getDraft();
     if (!draft) {
-      await message.reply(
-        `There is no active \`${draftDisplay}\` draft to leave.`,
-      );
+      await message.reply("There is no active draft queue to leave.");
       return;
     }
 
     if (!draft.has(message.author.id)) {
-      await message.reply(
-        `${message.author}, you are not in \`${draftDisplay}\`.`,
-      );
+      await message.reply(`${message.author}, you are not in the draft queue.`);
       return;
     }
 
@@ -397,40 +359,62 @@ client.on(djs.Events.MessageCreate, async (message) => {
 
     if (pretend) {
       await message.reply(
-        `[PRETEND] Would remove ${message.author} from draft \`${draftDisplay}\``,
+        `[PRETEND] Would remove ${message.author} from the draft queue`,
       );
       return;
     }
 
-    await leaveDraft(draftKey, message.author.id, textChannel, pretend);
-    const count = getPlayerCount(draftKey);
+    await leaveDraft(message.author.id, textChannel, pretend);
+    const count = getPlayerCount();
     await message.reply(
-      `${message.author} has left \`${draftDisplay}\`.\nRemaining players: **${count}**`,
+      `${message.author} has left the draft queue.\nRemaining players: **${count}**`,
     );
 
     if (count === 0) {
-      removeDraftIfEmpty(draftKey);
-      await message.reply(
-        `The \`${draftDisplay}\` draft is now empty and has been removed.`,
-      );
+      removeDraftIfEmpty();
+      await message.reply("The draft queue is now empty and has been removed.");
     }
     return;
   }
 
-  // Report command: !report <draft_name> @opponent 2-0 or 2-1 (only in matchmaking channel)
+  if (command === "!fire") {
+    if (!isAllowedDraftChannel(message)) {
+      return;
+    }
+
+    if (!message.channel.isTextBased() || message.channel.isDMBased()) {
+      return;
+    }
+
+    const count = getPlayerCount();
+    if (count === 0) {
+      await message.reply("The draft queue is empty — nothing to fire.");
+      return;
+    }
+
+    if (pretend) {
+      await message.reply(
+        `[PRETEND] Would fire the draft queue with ${count} player(s).`,
+      );
+      return;
+    }
+
+    await fireDraftQueue((text) => message.reply(text));
+    return;
+  }
+
   if (command === "!report") {
     if (!isAllowedMatchmakingChannel(message)) {
       return;
     }
 
-    const draftName = parts[1];
+    const podId = parts[1];
     const mentionedUsers = message.mentions.users.filter((u) => !u.bot);
-    const content = message.content.trim();
     const resultMatch = content.match(/2-0|2-1/);
 
-    if (!draftName) {
+    if (!podId) {
       await message.reply(
-        "Usage: `!report <draft_name> @opponent 2-0` or `!report <draft_name> @opponent 2-1`",
+        "Usage: `!report <pod_id> @opponent 2-0` or `!report <pod_id> @opponent 2-1`",
       );
       return;
     }
@@ -461,7 +445,7 @@ client.on(djs.Events.MessageCreate, async (message) => {
     const winnerId = message.author.id;
 
     const reportResult = await reportMatch(
-      draftName,
+      podId,
       winnerId,
       loserId,
       result,
@@ -481,21 +465,20 @@ client.on(djs.Events.MessageCreate, async (message) => {
     return;
   }
 
-  // Status command: !status <draft_name> (in matchmaking channel)
   if (command === "!status") {
     if (!isAllowedMatchmakingChannel(message)) {
       return;
     }
 
-    const draftName = parts[1];
-    if (!draftName) {
+    const podId = parts[1];
+    if (!podId) {
       await message.reply(
-        "Usage: `!status <draft_name>` — shows current round and matchup status",
+        "Usage: `!status <pod_id>` — shows current round and matchup status",
       );
       return;
     }
 
-    const status = await getDraftStatus(draftName);
+    const status = await getDraftStatus(podId);
 
     if (!status.ok) {
       await message.reply(status.error);
@@ -504,8 +487,13 @@ client.on(djs.Events.MessageCreate, async (message) => {
 
     if ("complete" in status && status.complete) {
       await message.reply(
-        `**\`${draftName}\`** — Tournament complete. All rounds finished.`,
+        `**Pod \`${podId}\`** — Tournament complete. All rounds finished.`,
       );
+      return;
+    }
+
+    if (!status.ok || !("round" in status)) {
+      await message.reply("Unable to load pod status.");
       return;
     }
 
@@ -518,7 +506,7 @@ client.on(djs.Events.MessageCreate, async (message) => {
     }
     const nameMap = new Map<string, string>();
     for (const id of userIds) {
-      const playerName = await getPlayerNameFromDraftLog(id, draftName);
+      const playerName = await getPlayerNameFromDraftLog(id, podId);
       nameMap.set(id, playerName ?? "Unknown");
     }
     const name = (id: string) => nameMap.get(id) ?? "Unknown";
@@ -533,153 +521,101 @@ client.on(djs.Events.MessageCreate, async (message) => {
       } — In progress`;
     });
     await message.reply(
-      `**Round ${round} status for \`${draftName}\`:**\n${lines.join("\n")}`,
+      `**Round ${round} status for pod \`${podId}\`:**\n${lines.join("\n")}`,
     );
     return;
   }
 
-  // Available command: !available
   if (command === "!available") {
-    // Check if command is from allowed channel
-    if (!isAllowedDraftChannel(message)) {
-      return;
-    }
-    const allDrafts = getAllDrafts();
-    if (allDrafts.size === 0) {
-      await message.reply("There are currently no active drafts.");
-      return;
-    }
-
-    const messageLines = ["**Active Drafts:**"];
-    for (const [draftKey, players] of allDrafts) {
-      // Convert draft key to display format (dash-separated to space-separated)
-      const draftDisplay = draftKey.includes("-")
-        ? draftKey.split("-").join(" ")
-        : draftKey;
-      messageLines.push(`- \`${draftDisplay}\`: ${players.size} player(s)`);
-    }
-    await message.reply(messageLines.join("\n"));
-    return;
-  }
-
-  // Notify command: !notify <draft_name>
-  if (command === "!notify") {
-    // Check if command is from allowed channel
     if (!isAllowedDraftChannel(message)) {
       return;
     }
 
-    const draftName = parts[1];
-    if (!draftName) {
-      await message.reply(
-        "Please provide a draft name (one word). Usage: `!notify TLA`",
-      );
+    const count = getPlayerCount();
+    if (count === 0) {
+      await message.reply("The draft queue is currently empty.");
       return;
     }
 
-    const draftKey = draftName;
-    const draftDisplay = draftName;
-
-    if (pretend) {
-      await message.reply(
-        `[PRETEND] Would opt ${message.author} in for notifications for \`${draftDisplay}\``,
-      );
-      return;
-    }
-
-    optInForNotifications(message.author.id, draftKey);
     await message.reply(
-      `✅ You've been opted in for notifications for \`${draftDisplay}\`. ` +
-        `You'll receive a DM when the queue reaches 5+ players (once every 12 hours). ` +
-        `Use \`!reset ${draftDisplay}\` to reset your notification timer.`,
+      `**Draft queue:** ${count} player(s) waiting (fires at 8).`,
     );
     return;
   }
 
-  // Reset command: !reset <draft_name>
-  if (command === "!reset") {
-    // Check if command is from allowed channel
+  if (command === "!notify") {
     if (!isAllowedDraftChannel(message)) {
       return;
     }
 
-    const draftName = parts[1];
-    if (!draftName) {
+    if (pretend) {
       await message.reply(
-        "Please provide a draft name (one word). Usage: `!reset TLA`",
+        `[PRETEND] Would opt ${message.author} in for draft queue notifications`,
       );
       return;
     }
 
-    const draftKey = draftName;
-    const draftDisplay = draftName;
+    optInForNotifications(message.author.id);
+    await message.reply(
+      "✅ You've been opted in for draft queue notifications. " +
+        "You'll receive a DM when the queue reaches 5+ players (once every 12 hours). " +
+        "Use `!reset` to reset your notification timer.",
+    );
+    return;
+  }
+
+  if (command === "!reset") {
+    if (!isAllowedDraftChannel(message)) {
+      return;
+    }
 
     if (pretend) {
       await message.reply(
-        `[PRETEND] Would reset notification timer for ${message.author} for \`${draftDisplay}\``,
+        `[PRETEND] Would reset notification timer for ${message.author}`,
       );
       return;
     }
 
-    const wasReset = resetNotificationTimer(message.author.id, draftKey);
+    const wasReset = resetNotificationTimer(message.author.id);
     if (wasReset) {
       await message.reply(
-        `✅ Your notification timer for \`${draftDisplay}\` has been reset. ` +
-          `You can now receive notifications again if the queue reaches 5+ players.`,
+        "✅ Your notification timer has been reset. " +
+          "You can now receive notifications again if the queue reaches 5+ players.",
       );
     } else {
       await message.reply(
-        `❌ You haven't opted in for notifications for \`${draftDisplay}\`. ` +
-          `Use \`!notify ${draftDisplay}\` to opt in first.`,
+        "❌ You haven't opted in for notifications. Use `!notify` to opt in first.",
       );
     }
     return;
   }
 
-  // Cancel command: !cancel <draft_name>
   if (command === "!cancel") {
-    // Check if command is from allowed channel
     if (!isAllowedDraftChannel(message)) {
       return;
     }
 
-    const draftName = parts[1];
-    if (!draftName) {
-      await message.reply(
-        "Please provide a draft name (one word). Usage: `!cancel TLA`",
-      );
-      return;
-    }
-
-    const draftKey = draftName;
-    const draftDisplay = draftName;
-
     if (pretend) {
       await message.reply(
-        `[PRETEND] Would opt ${message.author} out of notifications for \`${draftDisplay}\``,
+        `[PRETEND] Would opt ${message.author} out of notifications`,
       );
       return;
     }
 
-    const wasOptedOut = optOutOfNotifications(message.author.id, draftKey);
+    const wasOptedOut = optOutOfNotifications(message.author.id);
     if (wasOptedOut) {
       await message.reply(
-        `✅ You've been opted out of notifications for \`${draftDisplay}\`. ` +
-          `You will no longer receive DMs for this set code.`,
+        "✅ You've been opted out of draft queue notifications.",
       );
     } else {
       await message.reply(
-        `❌ You haven't opted in for notifications for \`${draftDisplay}\`. ` +
-          `Use \`!notify ${draftDisplay}\` to opt in first.`,
+        "❌ You haven't opted in for notifications. Use `!notify` to opt in first.",
       );
     }
     return;
   }
 });
 
-/**
- * Gracefully shuts down the bot, sending a message to the draft channel if configured
- */
 async function gracefulShutdown(signal: string) {
   console.log(`Received ${signal}, shutting down gracefully...`);
 
@@ -690,7 +626,6 @@ async function gracefulShutdown(signal: string) {
         await (channel as djs.TextChannel).send(
           "⚠️ Bot is going offline. All active drafts will be cleared.",
         );
-        // Give the message a moment to send
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
     } catch (error) {
@@ -698,14 +633,11 @@ async function gracefulShutdown(signal: string) {
     }
   }
 
-  // Destroy the client
   client.destroy();
   Deno.exit(0);
 }
 
-// Set up signal handlers for graceful shutdown
 if (command === "bot") {
-  // Handle SIGINT (Ctrl+C) - supported on all platforms
   Deno.addSignalListener("SIGINT", () => {
     gracefulShutdown("SIGINT").catch((error) => {
       console.error("Error during shutdown:", error);
@@ -713,8 +645,6 @@ if (command === "bot") {
     });
   });
 
-  // SIGTERM is only supported on Unix-like systems (Linux, macOS)
-  // Windows only supports SIGINT, SIGBREAK, and SIGUP
   if (Deno.build.os !== "windows") {
     Deno.addSignalListener("SIGTERM", () => {
       gracefulShutdown("SIGTERM").catch((error) => {
