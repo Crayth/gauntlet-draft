@@ -10,7 +10,7 @@ const MATCHES_HEADERS = [
   "Winner",
   "Loser",
   "Result",
-  "Draft Name",
+  "Pod ID",
   "Bot Handled",
 ];
 
@@ -49,7 +49,7 @@ async function ensureMatchesHeaders(): Promise<void> {
  * Reports a match result: records to Matches sheet and updates Matchups sheet.
  * Validates that both players are in a valid matchup for the draft with no winner yet.
  *
- * @param draftName - The draft name being reported for
+ * @param podId - The pod identifier being reported for
  * @param winnerId - Discord ID of the winner (message sender)
  * @param loserId - Discord ID of the loser (tagged player)
  * @param result - "2-0" or "2-1"
@@ -57,7 +57,7 @@ async function ensureMatchesHeaders(): Promise<void> {
  * @returns ReportResult indicating success or error
  */
 export async function reportMatch(
-  draftName: string,
+  podId: string,
   winnerId: string,
   loserId: string,
   result: "2-0" | "2-1",
@@ -75,20 +75,20 @@ export async function reportMatch(
     "UNFORMATTED_VALUE",
   );
 
-  const draftLower = draftName.toLowerCase();
-  const values = response.values || [];
+  const podLower = podId.toLowerCase();
+  const values = (response.values || []).map((row) => row ? [...row] : row);
   let matchRowIndex: number | null = null;
 
   for (let i = 0; i < values.length; i++) {
     const row = values[i];
     if (!row || row.length < 5) continue;
 
-    const rowDraft = String(row[0] ?? "").trim();
+    const rowPodId = String(row[0] ?? "").trim();
     const p1 = String(row[3] ?? "").trim();
     const p2 = String(row[4] ?? "").trim();
     const winner = String(row[5] ?? "").trim();
 
-    if (rowDraft.toLowerCase() !== draftLower) continue;
+    if (rowPodId.toLowerCase() !== podLower) continue;
     if (winner !== "") continue; // Already has a winner
 
     const pair = new Set([p1, p2]);
@@ -105,7 +105,7 @@ export async function reportMatch(
     return {
       ok: false,
       error:
-        "No valid matchup found. Both players must be paired in a matchup for this draft that hasn't been reported yet.",
+        "No valid matchup found. Both players must be paired in a matchup for this pod that hasn't been reported yet.",
     };
   }
 
@@ -121,7 +121,7 @@ export async function reportMatch(
     sheets,
     CONFIG.LIVE_SHEET_ID,
     MATCHES_RANGE,
-    [[winnerId, loserId, result, draftName, "Yes"]],
+    [[winnerId, loserId, result, podId, "Yes"]],
   );
 
   const sheetRow = matchRowIndex + 2;
@@ -132,7 +132,13 @@ export async function reportMatch(
     [[winnerId, result]],
   );
 
-  await createNextRoundIfReady(draftName, pretend, client);
+  const updatedRow = values[matchRowIndex];
+  if (updatedRow) {
+    updatedRow[5] = winnerId;
+    updatedRow[6] = result;
+  }
+
+  await createNextRoundIfReady(podId, pretend, client, values);
 
   return { ok: true };
 }

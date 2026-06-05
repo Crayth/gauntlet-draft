@@ -1,7 +1,9 @@
 import { delay } from "@std/async";
+import { GoogleApiError } from "googleapis";
 
 const MAX_RETRY_DELAY = 128_000; // milliseconds
 const DEFAULT_JITTER = 64; // milliseconds
+const RATE_LIMIT_RETRY_MS = 65_000; // Sheets quota is per minute
 
 /**
  * Executes an async operation with exponential backoff and jitter retry logic.
@@ -31,10 +33,16 @@ export async function withRetry<T>(
       if (disabled) {
         break;
       }
-      console.error("Retrying after error:", e);
+      if (e instanceof GoogleApiError && e.code === 429) {
+        retryDelay = Math.max(retryDelay, RATE_LIMIT_RETRY_MS);
+        console.error(
+          "Google Sheets rate limit hit, waiting before retry...",
+        );
+      } else {
+        console.error("Retrying after error:", e);
+      }
       await delay(retryDelay + Math.random() * jitter);
     }
   }
   throw lastError;
 }
-

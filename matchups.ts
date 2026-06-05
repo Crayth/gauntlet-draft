@@ -1,12 +1,19 @@
 import * as djs from "discord.js";
 import { CONFIG } from "./config.ts";
-import { getPlayerNameFromDraftLog } from "./draft_log.ts";
+import {
+  getPlayerNameFromDraftLog,
+  getPlayerNamesForPod,
+} from "./draft_log.ts";
+import {
+  computePodStandings,
+  recordPodResultsAndUpdateLeaderboard,
+} from "./leaderboard.ts";
 import { sheets, sheetsAppend, sheetsRead, sheetsWrite } from "./sheets.ts";
 
 const MATCHUPS_SHEET = "Matchups";
 const MATCHUPS_RANGE = `${MATCHUPS_SHEET}!A:G`;
 const MATCHUPS_HEADERS = [
-  "Draft Name",
+  "Pod ID",
   "Round",
   "Match #",
   "Player 1",
@@ -42,7 +49,7 @@ async function ensureMatchupsHeaders(): Promise<void> {
     values.length > 0 &&
     values[0] &&
     values[0].length > 0 &&
-    String(values[0][0]).trim() === "Draft Name";
+    String(values[0][0]).trim() === "Pod ID";
 
   if (!hasHeaders) {
     await sheetsWrite(
@@ -77,14 +84,14 @@ function buildSeatOrder(shuffled: string[]): string[] {
  * Randomizes the pairings: Match 1 = P1 vs P2, Match 2 = P3 vs P4, etc.
  * Player 1 and Player 2 store Discord IDs for linking to Draft Log and Matches.
  *
- * @param draftName - The name of the draft
+ * @param podId - Unique identifier for this pod
  * @param userIds - The 8 Discord user IDs (will be randomized and paired)
  * @param pretend - If true, only logs what would be done
  * @param client - Discord client for sending round announcement (optional)
  * @returns The 8 Discord IDs in seat order 1–8 for draftmancer, or empty array if pretend/failed
  */
 export async function createRound1Matchups(
-  draftName: string,
+  podId: string,
   userIds: readonly string[],
   pretend: boolean,
   client?: djs.Client,
@@ -101,7 +108,7 @@ export async function createRound1Matchups(
 
   if (pretend) {
     console.log(
-      `[PRETEND] Would create Round 1 matchups for draft "${draftName}"`,
+      `[PRETEND] Would create Round 1 matchups for pod "${podId}"`,
     );
     return seatOrder;
   }
@@ -113,7 +120,7 @@ export async function createRound1Matchups(
     const p1 = shuffled[i * 2];
     const p2 = shuffled[i * 2 + 1];
     rows.push([
-      draftName,
+      podId,
       1,
       i + 1,
       p1,
@@ -131,19 +138,19 @@ export async function createRound1Matchups(
   );
 
   console.log(
-    `Created Round 1 matchups (4 matches) for draft "${draftName}"`,
+    `Created Round 1 matchups (4 matches) for pod "${podId}"`,
   );
 
   if (client) {
-    await sendRoundAnnouncement(client, draftName, 1, rows);
+    await sendRoundAnnouncement(client, podId, 1, rows);
   }
 
   return seatOrder;
 }
 
-/** Match row: [Draft Name, Round, Match #, Player 1, Player 2, Winner, Match Result] */
+/** Match row: [Pod ID, Round, Match #, Player 1, Player 2, Winner, Match Result] */
 interface MatchupRow {
-  draftName: string;
+  podId: string;
   round: number;
   matchNum: number;
   p1: string;
@@ -153,12 +160,12 @@ interface MatchupRow {
 }
 
 function parseMatchupRow(row: unknown[]): MatchupRow | null {
-  if (!row || row.length < 5) return null; // Need at least Draft Name, Round, Match #, P1, P2; Winner and Result optional
+  if (!row || row.length < 5) return null; // Need at least Pod ID, Round, Match #, P1, P2; Winner and Result optional
   const round = parseInt(String(row[1] ?? ""), 10);
   const matchNum = parseInt(String(row[2] ?? ""), 10);
   if (isNaN(round) || isNaN(matchNum)) return null;
   return {
-    draftName: String(row[0] ?? "").trim(),
+    podId: String(row[0] ?? "").trim(),
     round,
     matchNum,
     p1: String(row[3] ?? "").trim(),
@@ -186,7 +193,7 @@ export type DraftStatusResult =
  * Gets the current round and match status for a draft.
  */
 export async function getDraftStatus(
-  draftName: string,
+  podId: string,
 ): Promise<DraftStatusResult> {
   const response = await sheetsRead(
     sheets,
@@ -195,12 +202,12 @@ export async function getDraftStatus(
     "UNFORMATTED_VALUE",
   );
 
-  const draftLower = draftName.toLowerCase();
+  const podLower = podId.toLowerCase();
   const values = response.values || [];
   const rows: MatchupRow[] = [];
   for (let i = 0; i < values.length; i++) {
     const parsed = parseMatchupRow(values[i]);
-    if (parsed && parsed.draftName.toLowerCase() === draftLower) {
+    if (parsed && parsed.podId.toLowerCase() === podLower) {
       rows.push(parsed);
     }
   }
@@ -208,7 +215,7 @@ export async function getDraftStatus(
   if (rows.length === 0) {
     return {
       ok: false,
-      error: `No matchups found for draft \`${draftName}\`.`,
+      error: `No matchups found for pod \`${podId}\`.`,
     };
   }
 
@@ -268,7 +275,7 @@ function getLoser(row: MatchupRow): string {
  * Match 5: W1 vs W2, Match 6: W3 vs W4, Match 7: L1 vs L2, Match 8: L3 vs L4
  */
 function buildRound2Rows(
-  draftName: string,
+  podId: string,
   r1: MatchupRow[],
 ): (string | number)[][] {
   const m1 = r1.find((r) => r.matchNum === 1)!;
@@ -286,10 +293,10 @@ function buildRound2Rows(
     l4 = getLoser(m4);
 
   return [
-    [draftName, 2, 5, w1, w2, "", ""],
-    [draftName, 2, 6, w3, w4, "", ""],
-    [draftName, 2, 7, l1, l2, "", ""],
-    [draftName, 2, 8, l3, l4, "", ""],
+    [podId, 2, 5, w1, w2, "", ""],
+    [podId, 2, 6, w3, w4, "", ""],
+    [podId, 2, 7, l1, l2, "", ""],
+    [podId, 2, 8, l3, l4, "", ""],
   ];
 }
 
@@ -298,7 +305,7 @@ function buildRound2Rows(
  * Match 9: W5 vs W6, Match 10: W7 vs W8, Match 11: L5 vs L6, Match 12: L7 vs L8
  */
 function buildRound3Rows(
-  draftName: string,
+  podId: string,
   r2: MatchupRow[],
 ): (string | number)[][] {
   const m5 = r2.find((r) => r.matchNum === 5)!;
@@ -316,10 +323,10 @@ function buildRound3Rows(
     l8 = getLoser(m8);
 
   return [
-    [draftName, 3, 9, w5, w6, "", ""],
-    [draftName, 3, 10, w7, w8, "", ""],
-    [draftName, 3, 11, l5, l6, "", ""],
-    [draftName, 3, 12, l7, l8, "", ""],
+    [podId, 3, 9, w5, w6, "", ""],
+    [podId, 3, 10, w7, w8, "", ""],
+    [podId, 3, 11, l5, l6, "", ""],
+    [podId, 3, 12, l7, l8, "", ""],
   ];
 }
 
@@ -328,38 +335,26 @@ function buildRound3Rows(
  */
 async function sendPodFinalStandings(
   client: djs.Client,
-  draftName: string,
+  podId: string,
   allRows: MatchupRow[],
 ): Promise<void> {
   if (!CONFIG.MATCHMAKING_CHANNEL_ID) return;
-  const winCounts = new Map<string, number>();
-  for (const row of allRows) {
-    if (row.p1) winCounts.set(row.p1, winCounts.get(row.p1) ?? 0);
-    if (row.p2) winCounts.set(row.p2, winCounts.get(row.p2) ?? 0);
-    if (row.winner) {
-      winCounts.set(row.winner, (winCounts.get(row.winner) ?? 0) + 1);
-    }
-  }
-  const sorted = [...winCounts.entries()].sort((a, b) => b[1] - a[1]);
 
-  const nameMap = new Map<string, string>();
-  for (const [userId] of sorted) {
-    const name = await getPlayerNameFromDraftLog(userId, draftName);
-    nameMap.set(userId, name ?? "Unknown");
-  }
+  const standings = computePodStandings(allRows);
+  const nameMap = await getPlayerNamesForPod(podId);
 
-  const lines = sorted.map(
-    ([userId, wins]) =>
-      `${nameMap.get(userId) ?? "Unknown"}: ${wins} win${
-        wins === 1 ? "" : "s"
-      }`,
+  const lines = standings.map(
+    (standing) =>
+      `${standing.place}. ${
+        nameMap.get(standing.userId) ?? "Unknown"
+      } — ${standing.wins} win${standing.wins === 1 ? "" : "s"}`,
   );
 
   try {
     const channel = await client.channels.fetch(CONFIG.MATCHMAKING_CHANNEL_ID);
     if (!channel?.isTextBased() || channel.isDMBased()) return;
 
-    const message = `**\`${draftName}\` pod complete — final standings:**\n${
+    const message = `**Pod \`${podId}\` complete — final standings:**\n${
       lines.join("\n")
     }`;
     await channel.send(message);
@@ -373,7 +368,7 @@ async function sendPodFinalStandings(
  */
 async function sendRoundAnnouncement(
   client: djs.Client,
-  draftName: string,
+  podId: string,
   round: number,
   rows: (string | number)[][],
 ): Promise<void> {
@@ -385,7 +380,7 @@ async function sendRoundAnnouncement(
     const lines = rows.map(
       (r) => `Match ${r[2]}: <@${r[3]}> vs <@${r[4]}>`,
     );
-    const message = `**Round ${round} matchups for \`${draftName}\`:**\n${
+    const message = `**Round ${round} matchups for pod \`${podId}\`:**\n${
       lines.join("\n")
     }`;
     await channel.send(message);
@@ -398,29 +393,33 @@ async function sendRoundAnnouncement(
  * If the previous round for this draft is complete, creates the next round's matchups.
  * Call after a match is reported.
  *
- * @param draftName - The draft name
+ * @param podId - The pod identifier
  * @param pretend - If true, only checks, does not write
  * @param client - Discord client for sending round announcement (optional)
  * @returns true if a new round was created
  */
 export async function createNextRoundIfReady(
-  draftName: string,
+  podId: string,
   pretend: boolean,
   client?: djs.Client,
+  matchupValues?: unknown[][],
 ): Promise<boolean> {
-  const response = await sheetsRead(
-    sheets,
-    CONFIG.LIVE_SHEET_ID,
-    `${MATCHUPS_SHEET}!A2:G`,
-    "UNFORMATTED_VALUE",
-  );
+  let values = matchupValues;
+  if (!values) {
+    const response = await sheetsRead(
+      sheets,
+      CONFIG.LIVE_SHEET_ID,
+      `${MATCHUPS_SHEET}!A2:G`,
+      "UNFORMATTED_VALUE",
+    );
+    values = response.values || [];
+  }
 
-  const draftLower = draftName.toLowerCase();
-  const values = response.values || [];
+  const podLower = podId.toLowerCase();
   const rows: MatchupRow[] = [];
   for (let i = 0; i < values.length; i++) {
     const parsed = parseMatchupRow(values[i]);
-    if (parsed && parsed.draftName.toLowerCase() === draftLower) {
+    if (parsed && parsed.podId.toLowerCase() === podLower) {
       rows.push(parsed);
     }
   }
@@ -433,19 +432,22 @@ export async function createNextRoundIfReady(
   const r2Complete = r2.length === 4 && r2.every((r) => r.winner !== "");
   const r3Complete = r3.length === 4 && r3.every((r) => r.winner !== "");
 
-  if (r3Complete && client) {
-    await sendPodFinalStandings(client, draftName, rows);
+  if (r3Complete) {
+    if (client) {
+      await sendPodFinalStandings(client, podId, rows);
+    }
+    await recordPodResultsAndUpdateLeaderboard(podId, rows, pretend, client);
   }
 
   if (r1Complete && r2.length === 0) {
     if (pretend) {
       console.log(
-        `[PRETEND] Would create Round 2 matchups for draft "${draftName}"`,
+        `[PRETEND] Would create Round 2 matchups for pod "${podId}"`,
       );
       return true;
     }
     await ensureMatchupsHeaders();
-    const round2Rows = buildRound2Rows(draftName, r1);
+    const round2Rows = buildRound2Rows(podId, r1);
     await sheetsAppend(
       sheets,
       CONFIG.LIVE_SHEET_ID,
@@ -453,10 +455,10 @@ export async function createNextRoundIfReady(
       round2Rows,
     );
     console.log(
-      `Created Round 2 matchups (4 matches) for draft "${draftName}"`,
+      `Created Round 2 matchups (4 matches) for pod "${podId}"`,
     );
     if (client) {
-      await sendRoundAnnouncement(client, draftName, 2, round2Rows);
+      await sendRoundAnnouncement(client, podId, 2, round2Rows);
     }
     return true;
   }
@@ -464,12 +466,12 @@ export async function createNextRoundIfReady(
   if (r2Complete && r3.length === 0) {
     if (pretend) {
       console.log(
-        `[PRETEND] Would create Round 3 matchups for draft "${draftName}"`,
+        `[PRETEND] Would create Round 3 matchups for pod "${podId}"`,
       );
       return true;
     }
     await ensureMatchupsHeaders();
-    const round3Rows = buildRound3Rows(draftName, r2);
+    const round3Rows = buildRound3Rows(podId, r2);
     await sheetsAppend(
       sheets,
       CONFIG.LIVE_SHEET_ID,
@@ -477,10 +479,10 @@ export async function createNextRoundIfReady(
       round3Rows,
     );
     console.log(
-      `Created Round 3 matchups (4 matches) for draft "${draftName}"`,
+      `Created Round 3 matchups (4 matches) for pod "${podId}"`,
     );
     if (client) {
-      await sendRoundAnnouncement(client, draftName, 3, round3Rows);
+      await sendRoundAnnouncement(client, podId, 3, round3Rows);
     }
     return true;
   }
