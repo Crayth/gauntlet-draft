@@ -16,6 +16,8 @@ const POD_RESULTS_HEADERS = [
 
 const LEADERBOARD_SHEET = "Leaderboard";
 const headersReady = new Set<string>();
+/** Only a player's best N pod win totals count toward the leaderboard average. */
+const LEADERBOARD_BEST_PODS = 3;
 const LEADERBOARD_HEADERS = [
   "Rank",
   "Player Name",
@@ -225,7 +227,7 @@ export async function recordPodResultsAndUpdateLeaderboard(
 
 /**
  * Rebuilds the Leaderboard sheet from all Pod Results rows.
- * Average wins = mean match wins across pods (higher is better).
+ * Average wins = mean of each player's best 3 pod win totals (higher is better).
  */
 export async function rebuildLeaderboard(): Promise<void> {
   const response = await sheetsRead(
@@ -237,7 +239,7 @@ export async function rebuildLeaderboard(): Promise<void> {
 
   const aggregates = new Map<
     string,
-    { name: string; podsPlayed: number; winSum: number }
+    { name: string; winsByPod: number[] }
   >();
 
   for (const row of response.values || []) {
@@ -249,27 +251,32 @@ export async function rebuildLeaderboard(): Promise<void> {
 
     const existing = aggregates.get(discordId);
     if (existing) {
-      existing.podsPlayed += 1;
-      existing.winSum += wins;
+      existing.winsByPod.push(wins);
       if (playerName && existing.name === "Unknown") {
         existing.name = playerName;
       }
     } else {
       aggregates.set(discordId, {
         name: playerName || "Unknown",
-        podsPlayed: 1,
-        winSum: wins,
+        winsByPod: [wins],
       });
     }
   }
 
   const sorted = [...aggregates.entries()]
-    .map(([discordId, agg]) => ({
-      discordId,
-      name: agg.name,
-      podsPlayed: agg.podsPlayed,
-      averageWins: agg.winSum / agg.podsPlayed,
-    }))
+    .map(([discordId, agg]) => {
+      const bestWins = [...agg.winsByPod]
+        .sort((a, b) => b - a)
+        .slice(0, LEADERBOARD_BEST_PODS);
+      const averageWins = bestWins.reduce((sum, w) => sum + w, 0) /
+        bestWins.length;
+      return {
+        discordId,
+        name: agg.name,
+        podsPlayed: agg.winsByPod.length,
+        averageWins,
+      };
+    })
     .sort((a, b) => b.averageWins - a.averageWins);
 
   await ensureLeaderboardHeaders();

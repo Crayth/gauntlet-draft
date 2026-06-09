@@ -27,6 +27,7 @@ import {
 } from "./draft_log.ts";
 import { createRound1Matchups, getDraftStatus } from "./matchups.ts";
 import { reportMatch } from "./matches.ts";
+import { rebuildLeaderboard } from "./leaderboard.ts";
 
 export { CONFIG };
 
@@ -82,6 +83,15 @@ client.once(djs.Events.ClientReady, async (readyClient) => {
   isClientReady = true;
   await initSheets();
   console.log("Google Sheets client initialized");
+
+  if (!pretend) {
+    try {
+      await rebuildLeaderboard();
+      console.log("Leaderboard refreshed on startup");
+    } catch (error) {
+      console.error("Error refreshing leaderboard on startup:", error);
+    }
+  }
 
   if (CONFIG.DRAFT_CHANNEL_ID) {
     try {
