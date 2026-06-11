@@ -39,7 +39,7 @@ Options:
   --help     Show this help message
 
 Requires Google Application Default Credentials and sheet tabs:
-  Draft Log, Matchups, Matches, Pod Results, Leaderboard
+  Draft Log, Matchups, Matches, Pod Results, Raw Data Leaderboard, Qualified Leaderboard
 `,
   );
   Deno.exit(0);
@@ -165,26 +165,28 @@ async function printPodResults(podId: string): Promise<void> {
   }
 }
 
-async function printLeaderboard(): Promise<void> {
-  const response = await sheetsRead(
-    sheets,
-    CONFIG.LIVE_SHEET_ID,
-    "Leaderboard!A2:E",
-    "UNFORMATTED_VALUE",
-  );
-
-  console.log("\nLeaderboard:");
-  const rows = response.values ?? [];
-  if (rows.length === 0 || rows.every((row) => !row || !row[0])) {
-    console.log("  (empty)");
-    return;
-  }
-
-  for (const row of rows) {
-    if (!row || !row[0]) continue;
-    console.log(
-      `  #${row[0]} ${row[1]} — ${row[3]} pod(s), avg wins ${row[4]}`,
+async function printLeaderboards(): Promise<void> {
+  for (const sheetName of ["Raw Data Leaderboard", "Qualified Leaderboard"]) {
+    const response = await sheetsRead(
+      sheets,
+      CONFIG.LIVE_SHEET_ID,
+      `'${sheetName}'!A2:E`,
+      "UNFORMATTED_VALUE",
     );
+
+    console.log(`\n${sheetName}:`);
+    const rows = response.values ?? [];
+    if (rows.length === 0 || rows.every((row) => !row || !row[0])) {
+      console.log("  (empty)");
+      continue;
+    }
+
+    for (const row of rows) {
+      if (!row || !row[0]) continue;
+      console.log(
+        `  #${row[0]} ${row[1]} — ${row[3]} pod(s), avg wins ${row[4]}`,
+      );
+    }
   }
 }
 
@@ -262,6 +264,6 @@ for (const s of standings) {
 }
 
 await printPodResults(podId);
-await printLeaderboard();
+await printLeaderboards();
 
 console.log("\nSimulation complete.");

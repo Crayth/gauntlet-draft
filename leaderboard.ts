@@ -14,10 +14,13 @@ const POD_RESULTS_HEADERS = [
   "Place",
 ];
 
-const LEADERBOARD_SHEET = "Leaderboard";
+const RAW_DATA_LEADERBOARD_SHEET = "Raw Data Leaderboard";
+const QUALIFIED_LEADERBOARD_SHEET = "Qualified Leaderboard";
 const headersReady = new Set<string>();
 /** Only a player's best N pod win totals count toward the leaderboard average. */
 const LEADERBOARD_BEST_PODS = 3;
+/** Minimum completed pods required for the Qualified Leaderboard. */
+const LEADERBOARD_MIN_PODS_TO_QUALIFY = 3;
 const LEADERBOARD_HEADERS = [
   "Rank",
   "Player Name",
@@ -36,6 +39,13 @@ interface MatchOutcomeRow {
   readonly p1: string;
   readonly p2: string;
   readonly winner: string;
+}
+
+interface LeaderboardEntry {
+  discordId: string;
+  name: string;
+  podsPlayed: number;
+  averageWins: number;
 }
 
 /**
@@ -93,13 +103,13 @@ async function ensurePodResultsHeaders(): Promise<void> {
   headersReady.add(POD_RESULTS_SHEET);
 }
 
-async function ensureLeaderboardHeaders(): Promise<void> {
-  if (headersReady.has(LEADERBOARD_SHEET)) return;
+async function ensureLeaderboardHeaders(sheetName: string): Promise<void> {
+  if (headersReady.has(sheetName)) return;
 
   const response = await sheetsRead(
     sheets,
     CONFIG.LIVE_SHEET_ID,
-    `${LEADERBOARD_SHEET}!A1:E1`,
+    `'${sheetName}'!A1:E1`,
     "UNFORMATTED_VALUE",
   );
   const values = response.values;
@@ -114,11 +124,11 @@ async function ensureLeaderboardHeaders(): Promise<void> {
     await sheetsWrite(
       sheets,
       CONFIG.LIVE_SHEET_ID,
-      `${LEADERBOARD_SHEET}!A1:E1`,
+      `'${sheetName}'!A1:E1`,
       [LEADERBOARD_HEADERS],
     );
   }
-  headersReady.add(LEADERBOARD_SHEET);
+  headersReady.add(sheetName);
 }
 
 async function podResultsExist(podId: string): Promise<boolean> {
@@ -163,8 +173,82 @@ async function resolvePlayerName(
   return "Unknown";
 }
 
+function computeLeaderboardEntries(
+  aggregates: Map<string, { name: string; winsByPod: number[] }>,
+): LeaderboardEntry[] {
+  return [...aggregates.entries()]
+    .map(([discordId, agg]) => {
+      const bestWins = [...agg.winsByPod]
+        .sort((a, b) => b - a)
+        .slice(0, LEADERBOARD_BEST_PODS);
+      const averageWins = bestWins.reduce((sum, w) => sum + w, 0) /
+        bestWins.length;
+      return {
+        discordId,
+        name: agg.name,
+        podsPlayed: agg.winsByPod.length,
+        averageWins,
+      };
+    })
+    .sort((a, b) => b.averageWins - a.averageWins);
+}
+
+async function writeLeaderboardSheet(
+  sheetName: string,
+  entries: readonly LeaderboardEntry[],
+): Promise<void> {
+  await ensureLeaderboardHeaders(sheetName);
+
+  const existing = await sheetsRead(
+    sheets,
+    CONFIG.LIVE_SHEET_ID,
+    `'${sheetName}'!A2:E`,
+    "UNFORMATTED_VALUE",
+  );
+  const previousRowCount = existing.values?.length ?? 0;
+
+  const leaderboardRows: (string | number)[][] = entries.map((entry, index) => [
+    index + 1,
+    entry.name,
+    entry.discordId,
+    entry.podsPlayed,
+    Math.round(entry.averageWins * 100) / 100,
+  ]);
+
+  if (leaderboardRows.length === 0) {
+    if (previousRowCount > 0) {
+      await sheetsWrite(
+        sheets,
+        CONFIG.LIVE_SHEET_ID,
+        `'${sheetName}'!A2:E${previousRowCount + 1}`,
+        Array.from({ length: previousRowCount }, () => ["", "", "", "", ""]),
+      );
+    }
+    return;
+  }
+
+  await sheetsWrite(
+    sheets,
+    CONFIG.LIVE_SHEET_ID,
+    `'${sheetName}'!A2:E${leaderboardRows.length + 1}`,
+    leaderboardRows,
+  );
+
+  if (previousRowCount > leaderboardRows.length) {
+    const clearCount = previousRowCount - leaderboardRows.length;
+    await sheetsWrite(
+      sheets,
+      CONFIG.LIVE_SHEET_ID,
+      `'${sheetName}'!A${leaderboardRows.length + 2}:E${
+        leaderboardRows.length + 1 + clearCount
+      }`,
+      Array.from({ length: clearCount }, () => ["", "", "", "", ""]),
+    );
+  }
+}
+
 /**
- * Records per-player pod results and rebuilds the leaderboard sheet.
+ * Records per-player pod results and rebuilds the leaderboard sheets.
  * Called when all three rounds for a pod are complete.
  */
 export async function recordPodResultsAndUpdateLeaderboard(
@@ -177,7 +261,7 @@ export async function recordPodResultsAndUpdateLeaderboard(
 
   if (pretend) {
     console.log(
-      `[PRETEND] Would record pod results for "${podId}" and rebuild leaderboard`,
+      `[PRETEND] Would record pod results for "${podId}" and rebuild leaderboards`,
     );
     for (const s of standings) {
       console.log(`  ${s.userId}: ${s.wins} wins, place ${s.place}`);
@@ -226,8 +310,9 @@ export async function recordPodResultsAndUpdateLeaderboard(
 }
 
 /**
- * Rebuilds the Leaderboard sheet from all Pod Results rows.
- * Average wins = mean of each player's best 3 pod win totals (higher is better).
+ * Rebuilds leaderboard sheets from all Pod Results rows.
+ * Raw Data Leaderboard: all players ranked by best-3 average wins.
+ * Qualified Leaderboard: players with at least 3 completed pods.
  */
 export async function rebuildLeaderboard(): Promise<void> {
   const response = await sheetsRead(
@@ -263,70 +348,15 @@ export async function rebuildLeaderboard(): Promise<void> {
     }
   }
 
-  const sorted = [...aggregates.entries()]
-    .map(([discordId, agg]) => {
-      const bestWins = [...agg.winsByPod]
-        .sort((a, b) => b - a)
-        .slice(0, LEADERBOARD_BEST_PODS);
-      const averageWins = bestWins.reduce((sum, w) => sum + w, 0) /
-        bestWins.length;
-      return {
-        discordId,
-        name: agg.name,
-        podsPlayed: agg.winsByPod.length,
-        averageWins,
-      };
-    })
-    .sort((a, b) => b.averageWins - a.averageWins);
-
-  await ensureLeaderboardHeaders();
-
-  const existing = await sheetsRead(
-    sheets,
-    CONFIG.LIVE_SHEET_ID,
-    `${LEADERBOARD_SHEET}!A2:E`,
-    "UNFORMATTED_VALUE",
-  );
-  const previousRowCount = existing.values?.length ?? 0;
-
-  const leaderboardRows: (string | number)[][] = sorted.map((entry, index) => [
-    index + 1,
-    entry.name,
-    entry.discordId,
-    entry.podsPlayed,
-    Math.round(entry.averageWins * 100) / 100,
-  ]);
-
-  if (leaderboardRows.length === 0) {
-    if (previousRowCount > 0) {
-      await sheetsWrite(
-        sheets,
-        CONFIG.LIVE_SHEET_ID,
-        `${LEADERBOARD_SHEET}!A2:E${previousRowCount + 1}`,
-        Array.from({ length: previousRowCount }, () => ["", "", "", "", ""]),
-      );
-    }
-    return;
-  }
-
-  await sheetsWrite(
-    sheets,
-    CONFIG.LIVE_SHEET_ID,
-    `${LEADERBOARD_SHEET}!A2:E${leaderboardRows.length + 1}`,
-    leaderboardRows,
+  const allEntries = computeLeaderboardEntries(aggregates);
+  const qualifiedEntries = allEntries.filter(
+    (entry) => entry.podsPlayed >= LEADERBOARD_MIN_PODS_TO_QUALIFY,
   );
 
-  if (previousRowCount > leaderboardRows.length) {
-    const clearCount = previousRowCount - leaderboardRows.length;
-    await sheetsWrite(
-      sheets,
-      CONFIG.LIVE_SHEET_ID,
-      `${LEADERBOARD_SHEET}!A${leaderboardRows.length + 2}:E${
-        leaderboardRows.length + 1 + clearCount
-      }`,
-      Array.from({ length: clearCount }, () => ["", "", "", "", ""]),
-    );
-  }
+  await writeLeaderboardSheet(RAW_DATA_LEADERBOARD_SHEET, allEntries);
+  await writeLeaderboardSheet(QUALIFIED_LEADERBOARD_SHEET, qualifiedEntries);
 
-  console.log(`Rebuilt leaderboard with ${leaderboardRows.length} players`);
+  console.log(
+    `Rebuilt leaderboards: ${allEntries.length} raw, ${qualifiedEntries.length} qualified`,
+  );
 }

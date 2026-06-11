@@ -87,7 +87,7 @@ client.once(djs.Events.ClientReady, async (readyClient) => {
   if (!pretend) {
     try {
       await rebuildLeaderboard();
-      console.log("Leaderboard refreshed on startup");
+      console.log("Leaderboards refreshed on startup");
     } catch (error) {
       console.error("Error refreshing leaderboard on startup:", error);
     }
