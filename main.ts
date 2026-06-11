@@ -26,7 +26,12 @@ import {
   recordDraftToLog,
 } from "./draft_log.ts";
 import { createRound1Matchups, getDraftStatus } from "./matchups.ts";
-import { reportMatch } from "./matches.ts";
+import {
+  findOpenMatchupForReporter,
+  parseReportedScore,
+  reportMatch,
+  resolveMatchReport,
+} from "./matches.ts";
 import { rebuildLeaderboard } from "./leaderboard.ts";
 
 export { CONFIG };
@@ -215,7 +220,7 @@ async function fireDraftQueue(
 
   await reply(
     `Use the draftmancer link in the announcement channel to start the draft, and share with your fellow opponents: ${setLink}${seatText}\n\n` +
-      `Pod ID: \`${podId}\` — use \`!report ${podId} @opponent 2-0\` and \`!status ${podId}\` for match tracking.`,
+      `Pod ID: \`${podId}\` — use \`!report ${podId} 2-0\` (or \`0-2\` if you lost) and \`!status ${podId}\` for match tracking.`,
   );
 
   closeDraft();
@@ -266,9 +271,14 @@ client.on(djs.Events.MessageCreate, async (message) => {
 
 \`!available\` - Show current queue player count
 
-\`!report <pod_id> @opponent 2-0\` or \`!report <pod_id> @opponent 2-1\` - Report a match result (e.g. \`!report P4827 @opponent 2-0\`)
+\`!report <pod_id> <score>\` - Report the result of your current open matchup (matchmaking channel)
+  • No need to tag your opponent — the bot finds your open match from the pod bracket
+  • Optional \`@opponent\` tag is accepted as a sanity check (must match your actual pairing)
+  • Use \`2-0\` or \`2-1\` if you won; use \`0-2\` or \`1-2\` if you lost
+  • Either player in the match can report
+  • Examples: \`!report P4827 2-1\` or \`!report P4827 @opponent 0-2\`
 
-\`!status <pod_id>\` - Show current round and matchup status
+\`!status <pod_id>\` - Show current round and matchup status (matchmaking channel)
 
 \`!fire\` - (Testing) Fire the queue immediately with current players
 
@@ -277,6 +287,7 @@ client.on(djs.Events.MessageCreate, async (message) => {
 **Notes:**
 • Draft commands must be used in the designated draft channel (if configured)
 • \`!report\` and \`!status\` must be used in the designated matchmaking channel (if configured)
+• \`!report\` only works while you have an unreported match in that pod — use \`!status\` if unsure
 • Round matchups and pod final standings are announced in the matchmaking channel
 • After 1 hour in the queue (without a queue timeout), you'll receive a DM to confirm. Respond in DMs with \`!yes\` within 5 minutes or \`!leave\` to leave
 • Players are automatically removed if they don't respond to the inactivity reminder
@@ -420,39 +431,54 @@ client.on(djs.Events.MessageCreate, async (message) => {
 
     const podId = parts[1];
     const mentionedUsers = message.mentions.users.filter((u) => !u.bot);
-    const resultMatch = content.match(/2-0|2-1/);
+    const reportedScore = parseReportedScore(content);
 
     if (!podId) {
       await message.reply(
-        "Usage: `!report <pod_id> @opponent 2-0` or `!report <pod_id> @opponent 2-1`",
+        "Usage: `!report <pod_id> <score>` — score is `2-0`, `2-1`, `0-2`, or `1-2`",
       );
       return;
     }
 
-    if (mentionedUsers.size !== 1) {
+    if (!reportedScore) {
       await message.reply(
-        "Please tag exactly one player (your opponent, the loser).",
+        "Please include the score: `2-0` or `2-1` if you won, `0-2` or `1-2` if you lost.",
       );
       return;
     }
 
-    const loserId = mentionedUsers.first()!.id;
-    if (loserId === message.author.id) {
-      await message.reply("You cannot report a match against yourself.");
+    if (mentionedUsers.size > 1) {
+      await message.reply("Please tag at most one player (your opponent).");
       return;
     }
 
-    if (
-      !resultMatch || (resultMatch[0] !== "2-0" && resultMatch[0] !== "2-1")
-    ) {
-      await message.reply(
-        "Please include the result: `2-0` or `2-1` (you are the winner).",
-      );
+    const matchup = await findOpenMatchupForReporter(podId, message.author.id);
+    if (!matchup.ok) {
+      await message.reply(matchup.error);
       return;
     }
 
-    const result = resultMatch[0] as "2-0" | "2-1";
-    const winnerId = message.author.id;
+    let opponentId = matchup.opponentId;
+    if (mentionedUsers.size === 1) {
+      const taggedId = mentionedUsers.first()!.id;
+      if (taggedId === message.author.id) {
+        await message.reply("You cannot report a match against yourself.");
+        return;
+      }
+      if (taggedId !== opponentId) {
+        await message.reply(
+          `Your open matchup is Round ${matchup.round} Match ${matchup.matchNum} vs <@${opponentId}>, not the player you tagged.`,
+        );
+        return;
+      }
+      opponentId = taggedId;
+    }
+
+    const { winnerId, loserId, result } = resolveMatchReport(
+      message.author.id,
+      opponentId,
+      reportedScore,
+    );
 
     const reportResult = await reportMatch(
       podId,
@@ -466,8 +492,8 @@ client.on(djs.Events.MessageCreate, async (message) => {
     if (reportResult.ok) {
       await message.reply(
         pretend
-          ? `[PRETEND] Would record match: you beat <@${loserId}> ${result}.`
-          : `Match recorded: you beat <@${loserId}> ${result}.`,
+          ? `[PRETEND] Would record match: <@${winnerId}> beat <@${loserId}> ${result}.`
+          : `Match recorded: <@${winnerId}> beat <@${loserId}> ${result}.`,
       );
     } else {
       await message.reply(reportResult.error);

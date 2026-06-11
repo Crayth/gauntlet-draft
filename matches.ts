@@ -14,9 +14,127 @@ const MATCHES_HEADERS = [
   "Bot Handled",
 ];
 
+export type MatchResult = "2-0" | "2-1";
+export type ReportedScore = MatchResult | "0-2" | "1-2";
+
 export type ReportResult =
   | { ok: true }
   | { ok: false; error: string };
+
+const SCORE_PATTERN = /(?:2-0|2-1|0-2|1-2)/;
+
+/**
+ * Parses a reported score from the message. Either player may report;
+ * 2-0/2-1 means the reporter won, 0-2/1-2 means the reporter lost.
+ */
+export function parseReportedScore(
+  content: string,
+): ReportedScore | null {
+  const match = content.match(SCORE_PATTERN);
+  if (!match) return null;
+  const score = match[0];
+  if (
+    score === "2-0" || score === "2-1" || score === "0-2" || score === "1-2"
+  ) {
+    return score;
+  }
+  return null;
+}
+
+/**
+ * Resolves winner, loser, and normalized result (always from winner's perspective).
+ */
+export function resolveMatchReport(
+  reporterId: string,
+  opponentId: string,
+  reportedScore: ReportedScore,
+): { winnerId: string; loserId: string; result: MatchResult } {
+  if (reportedScore === "2-0" || reportedScore === "2-1") {
+    return {
+      winnerId: reporterId,
+      loserId: opponentId,
+      result: reportedScore,
+    };
+  }
+  return {
+    winnerId: opponentId,
+    loserId: reporterId,
+    result: reportedScore === "0-2" ? "2-0" : "2-1",
+  };
+}
+
+/**
+ * Finds the reporter's current open matchup in a pod.
+ * Each player has at most one unreported match at a time (one per round).
+ */
+export async function findOpenMatchupForReporter(
+  podId: string,
+  reporterId: string,
+): Promise<
+  | { ok: true; opponentId: string; round: number; matchNum: number }
+  | { ok: false; error: string }
+> {
+  const response = await sheetsRead(
+    sheets,
+    CONFIG.LIVE_SHEET_ID,
+    `${MATCHUPS_SHEET}!A2:G`,
+    "UNFORMATTED_VALUE",
+  );
+
+  const podLower = podId.toLowerCase();
+  const openMatches: {
+    round: number;
+    matchNum: number;
+    opponentId: string;
+  }[] = [];
+
+  for (const row of response.values || []) {
+    if (!row || row.length < 5) continue;
+
+    const rowPodId = String(row[0] ?? "").trim();
+    if (rowPodId.toLowerCase() !== podLower) continue;
+
+    const winner = String(row[5] ?? "").trim();
+    if (winner !== "") continue;
+
+    const p1 = String(row[3] ?? "").trim();
+    const p2 = String(row[4] ?? "").trim();
+    const round = parseInt(String(row[1] ?? ""), 10);
+    const matchNum = parseInt(String(row[2] ?? ""), 10);
+
+    let opponentId: string | null = null;
+    if (p1 === reporterId) opponentId = p2;
+    else if (p2 === reporterId) opponentId = p1;
+
+    if (!opponentId || isNaN(round) || isNaN(matchNum)) continue;
+
+    openMatches.push({ round, matchNum, opponentId });
+  }
+
+  if (openMatches.length === 0) {
+    return {
+      ok: false,
+      error:
+        `You don't have an open matchup to report in pod \`${podId}\`. Use \`!status ${podId}\` to check progress.`,
+    };
+  }
+
+  if (openMatches.length > 1) {
+    return {
+      ok: false,
+      error:
+        "Multiple open matchups found — tag your opponent to disambiguate.",
+    };
+  }
+
+  const match = openMatches[0];
+  return {
+    ok: true,
+    opponentId: match.opponentId,
+    round: match.round,
+    matchNum: match.matchNum,
+  };
+}
 
 /**
  * Ensures the Matches sheet has headers.
@@ -52,7 +170,7 @@ async function ensureMatchesHeaders(): Promise<void> {
  * @param podId - The pod identifier being reported for
  * @param winnerId - Discord ID of the winner (message sender)
  * @param loserId - Discord ID of the loser (tagged player)
- * @param result - "2-0" or "2-1"
+ * @param result - "2-0" or "2-1" from the winner's perspective
  * @param pretend - If true, only validates, does not write
  * @returns ReportResult indicating success or error
  */
@@ -60,7 +178,7 @@ export async function reportMatch(
   podId: string,
   winnerId: string,
   loserId: string,
-  result: "2-0" | "2-1",
+  result: MatchResult,
   pretend: boolean,
   client?: djs.Client,
 ): Promise<ReportResult> {
