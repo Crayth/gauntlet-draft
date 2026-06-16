@@ -17,7 +17,7 @@ const POD_RESULTS_HEADERS = [
 const RAW_DATA_LEADERBOARD_SHEET = "Raw Data Leaderboard";
 const QUALIFIED_LEADERBOARD_SHEET = "Qualified Leaderboard";
 const headersReady = new Set<string>();
-/** Only a player's best N pod win totals count toward the leaderboard average. */
+/** Only a player's best N pod win totals count toward the Qualified Leaderboard average. */
 const LEADERBOARD_BEST_PODS = 3;
 /** Minimum completed pods required for the Qualified Leaderboard. */
 const LEADERBOARD_MIN_PODS_TO_QUALIFY = 3;
@@ -173,23 +173,28 @@ async function resolvePlayerName(
   return "Unknown";
 }
 
+function averageWinsForPods(
+  winsByPod: readonly number[],
+  bestPods?: number,
+): number {
+  const wins = bestPods != null
+    ? [...winsByPod].sort((a, b) => b - a).slice(0, bestPods)
+    : winsByPod;
+  if (wins.length === 0) return 0;
+  return wins.reduce((sum, w) => sum + w, 0) / wins.length;
+}
+
 function computeLeaderboardEntries(
   aggregates: Map<string, { name: string; winsByPod: number[] }>,
+  bestPods?: number,
 ): LeaderboardEntry[] {
   return [...aggregates.entries()]
-    .map(([discordId, agg]) => {
-      const bestWins = [...agg.winsByPod]
-        .sort((a, b) => b - a)
-        .slice(0, LEADERBOARD_BEST_PODS);
-      const averageWins = bestWins.reduce((sum, w) => sum + w, 0) /
-        bestWins.length;
-      return {
-        discordId,
-        name: agg.name,
-        podsPlayed: agg.winsByPod.length,
-        averageWins,
-      };
-    })
+    .map(([discordId, agg]) => ({
+      discordId,
+      name: agg.name,
+      podsPlayed: agg.winsByPod.length,
+      averageWins: averageWinsForPods(agg.winsByPod, bestPods),
+    }))
     .sort((a, b) => b.averageWins - a.averageWins);
 }
 
@@ -311,8 +316,9 @@ export async function recordPodResultsAndUpdateLeaderboard(
 
 /**
  * Rebuilds leaderboard sheets from all Pod Results rows.
- * Raw Data Leaderboard: all players ranked by best-3 average wins.
- * Qualified Leaderboard: players with at least 3 completed pods.
+ * Raw Data Leaderboard: all players ranked by average wins across every pod.
+ * Qualified Leaderboard: players with at least 3 completed pods, ranked by
+ * best-3 average wins.
  */
 export async function rebuildLeaderboard(): Promise<void> {
   const response = await sheetsRead(
@@ -349,7 +355,10 @@ export async function rebuildLeaderboard(): Promise<void> {
   }
 
   const allEntries = computeLeaderboardEntries(aggregates);
-  const qualifiedEntries = allEntries.filter(
+  const qualifiedEntries = computeLeaderboardEntries(
+    aggregates,
+    LEADERBOARD_BEST_PODS,
+  ).filter(
     (entry) => entry.podsPlayed >= LEADERBOARD_MIN_PODS_TO_QUALIFY,
   );
 
