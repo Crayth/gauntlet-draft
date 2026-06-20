@@ -18,7 +18,7 @@ const RAW_DATA_LEADERBOARD_SHEET = "Raw Data Leaderboard";
 const QUALIFIED_LEADERBOARD_SHEET = "Qualified Leaderboard";
 const headersReady = new Set<string>();
 /** Only a player's best N pod win totals count toward the Qualified Leaderboard average. */
-const LEADERBOARD_BEST_PODS = 3;
+const LEADERBOARD_BEST_PODS = 5;
 /** Minimum completed pods required for the Qualified Leaderboard. */
 const LEADERBOARD_MIN_PODS_TO_QUALIFY = 3;
 const LEADERBOARD_HEADERS = [
@@ -318,7 +318,7 @@ export async function recordPodResultsAndUpdateLeaderboard(
  * Rebuilds leaderboard sheets from all Pod Results rows.
  * Raw Data Leaderboard: all players ranked by average wins across every pod.
  * Qualified Leaderboard: players with at least 3 completed pods, ranked by
- * best-3 average wins.
+ * best-5 average wins.
  */
 export async function rebuildLeaderboard(): Promise<void> {
   const response = await sheetsRead(
