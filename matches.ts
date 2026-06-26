@@ -1,6 +1,7 @@
 import * as djs from "discord.js";
-import type { DraftLeague } from "./draft_league.ts";
+import { CONFIG } from "./config.ts";
 import { createNextRoundIfReady } from "./matchups.ts";
+import { sheets, sheetsAppend, sheetsRead, sheetsWrite } from "./sheets.ts";
 
 const MATCHUPS_SHEET = "Matchups";
 const MATCHES_SHEET = "Matches";
@@ -67,14 +68,18 @@ export function resolveMatchReport(
  * Each player has at most one unreported match at a time (one per round).
  */
 export async function findOpenMatchupForReporter(
-  league: DraftLeague,
   podId: string,
   reporterId: string,
 ): Promise<
   | { ok: true; opponentId: string; round: number; matchNum: number }
   | { ok: false; error: string }
 > {
-  const response = await league.read(`${MATCHUPS_SHEET}!A2:G`);
+  const response = await sheetsRead(
+    sheets,
+    CONFIG.LIVE_SHEET_ID,
+    `${MATCHUPS_SHEET}!A2:G`,
+    "UNFORMATTED_VALUE",
+  );
 
   const podLower = podId.toLowerCase();
   const openMatches: {
@@ -131,8 +136,16 @@ export async function findOpenMatchupForReporter(
   };
 }
 
-async function ensureMatchesHeaders(league: DraftLeague): Promise<void> {
-  const response = await league.read(`${MATCHES_SHEET}!A1:E1`);
+/**
+ * Ensures the Matches sheet has headers.
+ */
+async function ensureMatchesHeaders(): Promise<void> {
+  const response = await sheetsRead(
+    sheets,
+    CONFIG.LIVE_SHEET_ID,
+    `${MATCHES_SHEET}!A1:E1`,
+    "UNFORMATTED_VALUE",
+  );
   const values = response.values;
   const hasHeaders = values &&
     values.length > 0 &&
@@ -141,16 +154,27 @@ async function ensureMatchesHeaders(league: DraftLeague): Promise<void> {
     String(values[0][0]).trim() === "Winner";
 
   if (!hasHeaders) {
-    await league.write(`${MATCHES_SHEET}!A1:E1`, [MATCHES_HEADERS]);
+    await sheetsWrite(
+      sheets,
+      CONFIG.LIVE_SHEET_ID,
+      `${MATCHES_SHEET}!A1:E1`,
+      [MATCHES_HEADERS],
+    );
   }
 }
 
 /**
  * Reports a match result: records to Matches sheet and updates Matchups sheet.
  * Validates that both players are in a valid matchup for the draft with no winner yet.
+ *
+ * @param podId - The pod identifier being reported for
+ * @param winnerId - Discord ID of the winner (message sender)
+ * @param loserId - Discord ID of the loser (tagged player)
+ * @param result - "2-0" or "2-1" from the winner's perspective
+ * @param pretend - If true, only validates, does not write
+ * @returns ReportResult indicating success or error
  */
 export async function reportMatch(
-  league: DraftLeague,
   podId: string,
   winnerId: string,
   loserId: string,
@@ -162,7 +186,12 @@ export async function reportMatch(
     return { ok: false, error: "Winner and loser must be different players." };
   }
 
-  const response = await league.read(`${MATCHUPS_SHEET}!A2:G`);
+  const response = await sheetsRead(
+    sheets,
+    CONFIG.LIVE_SHEET_ID,
+    `${MATCHUPS_SHEET}!A2:G`,
+    "UNFORMATTED_VALUE",
+  );
 
   const podLower = podId.toLowerCase();
   const values = (response.values || []).map((row) => row ? [...row] : row);
@@ -178,7 +207,7 @@ export async function reportMatch(
     const winner = String(row[5] ?? "").trim();
 
     if (rowPodId.toLowerCase() !== podLower) continue;
-    if (winner !== "") continue;
+    if (winner !== "") continue; // Already has a winner
 
     const pair = new Set([p1, p2]);
     const reported = new Set([winnerId, loserId]);
@@ -199,18 +228,24 @@ export async function reportMatch(
   }
 
   if (pretend) {
-    return { ok: true };
+    return {
+      ok: true,
+    };
   }
 
-  await ensureMatchesHeaders(league);
+  await ensureMatchesHeaders();
 
-  await league.append(
+  await sheetsAppend(
+    sheets,
+    CONFIG.LIVE_SHEET_ID,
     MATCHES_RANGE,
     [[winnerId, loserId, result, podId, "Yes"]],
   );
 
   const sheetRow = matchRowIndex + 2;
-  await league.write(
+  await sheetsWrite(
+    sheets,
+    CONFIG.LIVE_SHEET_ID,
     `${MATCHUPS_SHEET}!F${sheetRow}:G${sheetRow}`,
     [[winnerId, result]],
   );
@@ -221,7 +256,7 @@ export async function reportMatch(
     updatedRow[6] = result;
   }
 
-  await createNextRoundIfReady(league, podId, pretend, client, values);
+  await createNextRoundIfReady(podId, pretend, client, values);
 
   return { ok: true };
 }
