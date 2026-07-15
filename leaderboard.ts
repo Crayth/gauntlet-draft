@@ -32,7 +32,9 @@ const QUALIFIED_LEADERBOARD_HEADERS = [
   ...LEADERBOARD_HEADERS,
   "Average Wins (4)",
   "Average Wins (5)",
+  "Games Won",
 ];
+const MATCHES_SHEET = "Matches";
 
 export interface PodStanding {
   readonly userId: string;
@@ -53,6 +55,7 @@ interface LeaderboardEntry {
   averageWins: number;
   averageWins4?: number;
   averageWins5?: number;
+  gamesWon?: number;
 }
 
 /**
@@ -117,7 +120,61 @@ function leaderboardHeadersForSheet(sheetName: string): readonly string[] {
 }
 
 function leaderboardLastColumn(sheetName: string): string {
-  return sheetName === QUALIFIED_LEADERBOARD_SHEET ? "G" : "E";
+  return sheetName === QUALIFIED_LEADERBOARD_SHEET ? "H" : "E";
+}
+
+/**
+ * Parses a winner-perspective result ("2-0" / "2-1") into game wins for each side.
+ */
+function gamesFromMatchResult(
+  result: string,
+): { winnerGames: number; loserGames: number } | null {
+  const parts = result.split("-").map((part) => parseInt(part, 10));
+  if (parts.length !== 2 || parts.some((n) => isNaN(n))) return null;
+  return { winnerGames: parts[0], loserGames: parts[1] };
+}
+
+/**
+ * Tallies individual games won per player from the Matches sheet, limited to
+ * completed pods (those present in Pod Results).
+ */
+async function loadGamesWonByPlayer(
+  completedPodIds: ReadonlySet<string>,
+): Promise<Map<string, number>> {
+  const gamesWonByPlayer = new Map<string, number>();
+  if (completedPodIds.size === 0) return gamesWonByPlayer;
+
+  const response = await sheetsRead(
+    sheets,
+    CONFIG.LIVE_SHEET_ID,
+    `${MATCHES_SHEET}!A2:D`,
+    "UNFORMATTED_VALUE",
+  );
+
+  for (const row of response.values || []) {
+    if (!row || row.length < 4) continue;
+    const winnerId = String(row[0] ?? "").trim();
+    const loserId = String(row[1] ?? "").trim();
+    const result = String(row[2] ?? "").trim();
+    const podId = String(row[3] ?? "").trim().toLowerCase();
+    if (!winnerId || !loserId || !podId || !completedPodIds.has(podId)) {
+      continue;
+    }
+
+    const games = gamesFromMatchResult(result);
+    if (!games) continue;
+
+    gamesWonByPlayer.set(
+      winnerId,
+      (gamesWonByPlayer.get(winnerId) ?? 0) + games.winnerGames,
+    );
+    gamesWonByPlayer.set(
+      loserId,
+      (gamesWonByPlayer.get(loserId) ?? 0) + games.loserGames,
+    );
+  }
+
+  return gamesWonByPlayer;
 }
 
 async function ensureLeaderboardHeaders(sheetName: string): Promise<void> {
@@ -220,6 +277,7 @@ function computeLeaderboardEntries(
 
 function computeQualifiedLeaderboardEntries(
   aggregates: Map<string, { name: string; winsByPod: number[] }>,
+  gamesWonByPlayer: ReadonlyMap<string, number>,
 ): LeaderboardEntry[] {
   return [...aggregates.entries()]
     .map(([discordId, agg]) => ({
@@ -229,6 +287,7 @@ function computeQualifiedLeaderboardEntries(
       averageWins: averageWinsForPods(agg.winsByPod, LEADERBOARD_BEST_PODS),
       averageWins4: averageWinsForPods(agg.winsByPod, 4),
       averageWins5: averageWinsForPods(agg.winsByPod, 5),
+      gamesWon: gamesWonByPlayer.get(discordId) ?? 0,
     }))
     .filter((entry) => entry.podsPlayed >= LEADERBOARD_MIN_PODS_TO_QUALIFY)
     .sort((a, b) => b.averageWins - a.averageWins);
@@ -250,6 +309,7 @@ function leaderboardRowForEntry(
     row.push(
       roundAverage(entry.averageWins4!),
       roundAverage(entry.averageWins5!),
+      entry.gamesWon ?? 0,
     );
   }
   return row;
@@ -376,10 +436,11 @@ export async function recordPodResultsAndUpdateLeaderboard(
 }
 
 /**
- * Rebuilds leaderboard sheets from all Pod Results rows.
+ * Rebuilds leaderboard sheets from all Pod Results rows (and Matches for
+ * games-won totals).
  * Raw Data Leaderboard: all players ranked by average wins across every pod.
  * Qualified Leaderboard: players with at least 3 completed pods, ranked by
- * best-3 average wins, with best-4 and best-5 averages in additional columns.
+ * best-3 average wins, with best-4/best-5 averages and total games won.
  */
 export async function rebuildLeaderboard(): Promise<void> {
   const response = await sheetsRead(
@@ -393,13 +454,16 @@ export async function rebuildLeaderboard(): Promise<void> {
     string,
     { name: string; winsByPod: number[] }
   >();
+  const completedPodIds = new Set<string>();
 
   for (const row of response.values || []) {
     if (!row || row.length < 4) continue;
+    const podId = String(row[0] ?? "").trim().toLowerCase();
     const playerName = String(row[1] ?? "").trim();
     const discordId = String(row[2] ?? "").trim();
     const wins = parseInt(String(row[3] ?? ""), 10);
     if (!discordId || isNaN(wins)) continue;
+    if (podId) completedPodIds.add(podId);
 
     const existing = aggregates.get(discordId);
     if (existing) {
@@ -415,8 +479,12 @@ export async function rebuildLeaderboard(): Promise<void> {
     }
   }
 
+  const gamesWonByPlayer = await loadGamesWonByPlayer(completedPodIds);
   const allEntries = computeLeaderboardEntries(aggregates);
-  const qualifiedEntries = computeQualifiedLeaderboardEntries(aggregates);
+  const qualifiedEntries = computeQualifiedLeaderboardEntries(
+    aggregates,
+    gamesWonByPlayer,
+  );
 
   await writeLeaderboardSheet(RAW_DATA_LEADERBOARD_SHEET, allEntries);
   await writeLeaderboardSheet(QUALIFIED_LEADERBOARD_SHEET, qualifiedEntries);

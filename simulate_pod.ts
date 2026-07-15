@@ -167,10 +167,11 @@ async function printPodResults(podId: string): Promise<void> {
 
 async function printLeaderboards(): Promise<void> {
   for (const sheetName of ["Raw Data Leaderboard", "Qualified Leaderboard"]) {
+    const lastCol = sheetName === "Qualified Leaderboard" ? "H" : "E";
     const response = await sheetsRead(
       sheets,
       CONFIG.LIVE_SHEET_ID,
-      `'${sheetName}'!A2:E`,
+      `'${sheetName}'!A2:${lastCol}`,
       "UNFORMATTED_VALUE",
     );
 
@@ -183,8 +184,12 @@ async function printLeaderboards(): Promise<void> {
 
     for (const row of rows) {
       if (!row || !row[0]) continue;
+      const gamesWonSuffix = sheetName === "Qualified Leaderboard" &&
+          row[7] != null && row[7] !== ""
+        ? `, ${row[7]} games won`
+        : "";
       console.log(
-        `  #${row[0]} ${row[1]} — ${row[3]} pod(s), avg wins ${row[4]}`,
+        `  #${row[0]} ${row[1]} — ${row[3]} pod(s), avg wins ${row[4]}${gamesWonSuffix}`,
       );
     }
   }
