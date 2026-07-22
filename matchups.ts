@@ -331,14 +331,14 @@ function buildRound3Rows(
 }
 
 /**
- * Sends the final pod standings (wins per player, sorted by most wins) to the matchmaking channel.
+ * Sends the final pod standings (wins per player, sorted by most wins) to the draft channel.
  */
 async function sendPodFinalStandings(
   client: djs.Client,
   podId: string,
   allRows: MatchupRow[],
 ): Promise<void> {
-  if (!CONFIG.MATCHMAKING_CHANNEL_ID) return;
+  if (!CONFIG.DRAFT_CHANNEL_ID) return;
 
   const standings = computePodStandings(allRows);
   const nameMap = await getPlayerNamesForPod(podId);
@@ -351,7 +351,7 @@ async function sendPodFinalStandings(
   );
 
   try {
-    const channel = await client.channels.fetch(CONFIG.MATCHMAKING_CHANNEL_ID);
+    const channel = await client.channels.fetch(CONFIG.DRAFT_CHANNEL_ID);
     if (!channel?.isTextBased() || channel.isDMBased()) return;
 
     const message = `**Pod \`${podId}\` complete — final standings:**\n${
@@ -364,7 +364,7 @@ async function sendPodFinalStandings(
 }
 
 /**
- * Sends an announcement of round matchups to the matchmaking channel.
+ * Sends an announcement of round matchups to the draft channel.
  */
 async function sendRoundAnnouncement(
   client: djs.Client,
@@ -372,9 +372,9 @@ async function sendRoundAnnouncement(
   round: number,
   rows: (string | number)[][],
 ): Promise<void> {
-  if (!CONFIG.MATCHMAKING_CHANNEL_ID) return;
+  if (!CONFIG.DRAFT_CHANNEL_ID) return;
   try {
-    const channel = await client.channels.fetch(CONFIG.MATCHMAKING_CHANNEL_ID);
+    const channel = await client.channels.fetch(CONFIG.DRAFT_CHANNEL_ID);
     if (!channel?.isTextBased() || channel.isDMBased()) return;
 
     const lines = rows.map(

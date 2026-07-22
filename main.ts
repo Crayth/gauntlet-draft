@@ -129,9 +129,6 @@ function isAllowedDraftChannel(message: djs.Message): boolean {
   return message.channel.id === CONFIG.DRAFT_CHANNEL_ID;
 }
 
-function isAllowedMatchmakingChannel(message: djs.Message): boolean {
-  return message.channel.id === CONFIG.MATCHMAKING_CHANNEL_ID;
-}
 
 export async function ensureUserInDatabase(
   user: djs.User,
@@ -271,24 +268,23 @@ client.on(djs.Events.MessageCreate, async (message) => {
 
 \`!available\` - Show current queue player count
 
-\`!report <pod_id> <score>\` - Report the result of your current open matchup (matchmaking channel)
+\`!report <pod_id> <score>\` - Report the result of your current open matchup
   • No need to tag your opponent — the bot finds your open match from the pod bracket
   • Optional \`@opponent\` tag is accepted as a sanity check (must match your actual pairing)
   • Use \`2-0\` or \`2-1\` if you won; use \`0-2\` or \`1-2\` if you lost
   • Either player in the match can report
   • Examples: \`!report P4827 2-1\` or \`!report P4827 @opponent 0-2\`
 
-\`!status <pod_id>\` - Show current round and matchup status (matchmaking channel)
+\`!status <pod_id>\` - Show current round and matchup status
 
 \`!fire\` - (Testing) Fire the queue immediately with current players
 
 \`!help\` - Show this help message
 
 **Notes:**
-• Draft commands must be used in the designated draft channel (if configured)
-• \`!report\` and \`!status\` must be used in the designated matchmaking channel (if configured)
+• All draft and match commands must be used in the designated draft channel (if configured)
 • \`!report\` only works while you have an unreported match in that pod — use \`!status\` if unsure
-• Round matchups and pod final standings are announced in the matchmaking channel
+• Round matchups and pod final standings are announced in the draft channel
 • After 1 hour in the queue (without a queue timeout), you'll receive a DM to confirm. Respond in DMs with \`!yes\` within 5 minutes or \`!leave\` to leave
 • Players are automatically removed if they don't respond to the inactivity reminder
 • Drafts are cleared when the bot goes offline`;
@@ -425,7 +421,7 @@ client.on(djs.Events.MessageCreate, async (message) => {
   }
 
   if (command === "!report") {
-    if (!isAllowedMatchmakingChannel(message)) {
+    if (!isAllowedDraftChannel(message)) {
       return;
     }
 
@@ -502,7 +498,7 @@ client.on(djs.Events.MessageCreate, async (message) => {
   }
 
   if (command === "!status") {
-    if (!isAllowedMatchmakingChannel(message)) {
+    if (!isAllowedDraftChannel(message)) {
       return;
     }
 
